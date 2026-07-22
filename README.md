@@ -4,7 +4,7 @@ HTTP and Gopher protocols implemented entirely from scratch in C, using the raw 
 
 This project was built as a hands-on introduction to socket programming: Gopher (RFC 1436) is one of the simplest possible TCP application protocols, and HTTP/1.1 (a practical subset) builds on the same socket primitives to introduce headers, status codes, and explicit content-length framing.
 
-📄 **Full technical write-up (LaTeX/PDF):** [`docs/Protocols_Implementation.pdf`](docs/Protocols_Implementation.pdf) — a line-by-line walkthrough of every file, networking fundamentals, build instructions, and documented debugging sessions.
+ **Full technical write-up (LaTeX/PDF):** [`docs/Protocols_Implementation.pdf`](docs/Protocols_Implementation.pdf) — a line-by-line walkthrough of every file, networking fundamentals, build instructions, and documented debugging sessions.
 
 ## Project Structure
 
@@ -72,11 +72,11 @@ curl http://localhost:8080/
 
 | | Gopher | HTTP |
 |---|---|---|
-| Server | ✅ | ✅ (GET only) |
-| Client | ✅ | ✅ |
+| Server | T | F (GET only) |
+| Client | T | T |
 | End-of-message signal | Connection close | `Content-Length` header |
 | Status/error reporting | Informal type-`3` lines | 200 / 400 / 404 / 405 |
-| Path traversal protection | ❌ | ✅ |
+| Path traversal protection | F | T |
 
 See the PDF documentation's final chapter for a full, honest list of limitations (no concurrency, no keep-alive, no chunked encoding, GET-only, etc.) and suggested extensions.
 
