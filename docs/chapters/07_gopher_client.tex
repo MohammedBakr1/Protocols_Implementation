@@ -1,0 +1,69 @@
+\chapter{Line-by-Line: \texttt{gopher\_client.c}}
+\label{chap:gopher-client}
+
+\section{Overview}
+
+The Gopher client is deliberately short: it exists to demonstrate that the \emph{same} shared utility functions used to build the server (Chapter~\ref{chap:socket-utils}) work identically from the client side, and to provide a real end-to-end counterpart for testing the server against something other than a Python script or \inlinecode{nc}.
+
+\section{Argument Parsing}
+
+\begin{lstlisting}[style=cstyle]
+int main(int argc, char *argv[]) {
+    if (argc < 3) {
+        fprintf(stderr, "Usage: %s <host> <port> [selector]\n", argv[0]);
+        fprintf(stderr, "Example: %s localhost 7070 about.txt\n", argv[0]);
+        return 1;
+    }
+
+    const char *host = argv[1];
+    int port = atoi(argv[2]);
+    const char *selector = (argc >= 4) ? argv[3] : "";
+\end{lstlisting}
+
+The client requires at least a host and a port; the selector is optional and defaults to the empty string, which (per the protocol, Chapter~\ref{chap:gopher-protocol}) requests the server's root menu. \inlinecode{argv[0]} is conventionally the program's own invocation name, which is why it appears in the usage message rather than a hard-coded string --- this makes the message accurate even if the executable is renamed. Note that \inlinecode{atoi} performs no error checking: passing a non-numeric string as the port argument silently yields \texttt{0} rather than producing an error, a limitation discussed further in Chapter~\ref{chap:limitations}.
+
+\section{Connecting and Sending the Request}
+
+\begin{lstlisting}[style=cstyle]
+    int fd = connect_to_server(host, port);
+    if (fd < 0) {
+        fprintf(stderr, "Failed to connect to %s:%d\n", host, port);
+        return 1;
+    }
+
+    char request[600];
+    int req_len = snprintf(request, sizeof(request), "%s\r\n", selector);
+
+    if (send_all(fd, request, (size_t)req_len) != 0) {
+        fprintf(stderr, "Failed to send request\n");
+        close(fd);
+        return 1;
+    }
+\end{lstlisting}
+
+\inlinecode{connect\_to\_server} (Chapter~\ref{chap:socket-utils}) handles hostname resolution and the TCP handshake in one call. The entire Gopher request --- recall from Chapter~\ref{chap:gopher-protocol} that this is simply the selector followed by \texttt{\textbackslash r\textbackslash n} --- is built with a single \inlinecode{snprintf} into a stack buffer, then transmitted with \inlinecode{send\_all} to guarantee it is delivered in full even if the underlying \inlinecode{send} call needs multiple attempts (Section~\ref{sec:partial-io}).
+
+\section{Reading and Printing the Response}
+
+\begin{lstlisting}[style=cstyle]
+    size_t response_len = 0;
+    char *response = read_until_close(fd, &response_len);
+    close(fd);
+
+    if (!response) {
+        fprintf(stderr, "Failed to read response\n");
+        return 1;
+    }
+
+    printf("%s", response);
+    free(response);
+
+    return 0;
+}
+\end{lstlisting}
+
+Because Gopher signals the end of a response by closing the connection (Chapter~\ref{chap:gopher-protocol}), the client can simply call \inlinecode{read\_until\_close} and trust that it will return only once the server has finished sending and disconnected. The socket is closed immediately after reading, since nothing more will arrive on it. The response buffer, which was heap-allocated inside \inlinecode{read\_until\_close}, is printed directly and then explicitly freed --- ownership of that allocation was documented as transferring to the caller in the header comment discussed in Chapter~\ref{chap:socket-utils}, and this is where that responsibility is discharged.
+
+\begin{note}
+This client prints the \emph{raw} Gopher response verbatim, including the tab-separated menu syntax and trailing \texttt{.\textbackslash r\textbackslash n} terminator when the response is a menu. A ``real'' Gopher client would parse this structure and render a navigable menu; this implementation intentionally stops short of that, since the parsing itself does not exercise any new networking concept beyond what Chapter~\ref{chap:gopher-protocol} already documents about the format.
+\end{note}

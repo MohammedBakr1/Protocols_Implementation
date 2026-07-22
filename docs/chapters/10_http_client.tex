@@ -1,0 +1,169 @@
+\chapter{Line-by-Line: \texttt{http\_client.c}}
+\label{chap:http-client}
+
+\section{Why the Client Is More Complex Than the Server}
+
+At first glance it may seem surprising that the HTTP \emph{client} requires more intricate parsing logic than the server. The reason is fundamental, and was previewed in Chapter~\ref{chap:http-protocol} (Section~\ref{sec:http-framing}): the server \emph{generates} every response it sends, so it always knows the exact body length in advance (via \inlinecode{stat()}, Chapter~\ref{chap:http-server}). The client, by contrast, receives an arbitrary byte stream from the network and must \emph{discover} where the headers end and how many body bytes follow, using only the data itself. This chapter's two static helper functions exist specifically to solve that discovery problem.
+
+\section{Includes}
+
+\begin{lstlisting}[style=cstyle]
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include <ctype.h>
+#include "../common/socket_utils.h"
+\end{lstlisting}
+
+The only addition compared to the other three files in this project is \inlinecode{<ctype.h>}, needed for \inlinecode{tolower()} in \inlinecode{parse\_content\_length}, discussed below.
+
+\section{\texttt{find\_headers\_end}: Locating the Header/Body Boundary}
+
+\begin{lstlisting}[style=cstyle]
+static char *find_headers_end(char *buf, size_t len) {
+    for (size_t i = 0; i + 3 < len; i++) {
+        if (buf[i] == '\r' && buf[i+1] == '\n' && buf[i+2] == '\r' && buf[i+3] == '\n') {
+            return buf + i;
+        }
+    }
+    return NULL;
+}
+\end{lstlisting}
+
+This function performs a linear scan of the raw response buffer looking for the four-byte sequence \texttt{\textbackslash r\textbackslash n\textbackslash r\textbackslash n}, which --- as established in Chapter~\ref{chap:http-protocol} --- unambiguously marks the boundary between the headers section and the body of an HTTP message. The loop condition \inlinecode{i + 3 < len} (rather than \inlinecode{i < len}) is a bounds-safety detail: since the check inside the loop reads \inlinecode{buf[i+3]}, the loop must stop early enough that \inlinecode{i+3} never indexes past the end of the buffer, which would be undefined behavior (reading memory outside the allocated region).
+
+\begin{note}
+This function operates on raw bytes, not a null-terminated C string function like \inlinecode{strstr}. This matters because an HTTP response body can legitimately contain binary data (e.g.\ an image) that includes null bytes or any other byte value --- using a string function that stops at the first \texttt{'\textbackslash 0'} could silently truncate the search. Scanning byte-by-byte with an explicit length, as done here, is correct regardless of the body's content.
+\end{note}
+
+If no such sequence is found, the function returns \inlinecode{NULL}, which the caller (\inlinecode{main}, below) treats as a fatal parsing error --- a well-formed HTTP response, by definition, always contains this boundary.
+
+\section{\texttt{parse\_content\_length}: Extracting a Header Value}
+
+\begin{lstlisting}[style=cstyle]
+static long parse_content_length(const char *headers) {
+    const char *p = headers;
+    size_t target_len = strlen("content-length:");
+
+    while (*p) {
+        size_t i = 0;
+        while (i < target_len && p[i] &&
+               tolower((unsigned char)p[i]) == "content-length:"[i]) {
+            i++;
+        }
+        if (i == target_len) {
+            return atol(p + target_len);
+        }
+        p++;
+    }
+    return -1;
+}
+\end{lstlisting}
+
+This function searches for the \texttt{Content-Length:} header within the (null-terminated) headers text and, if found, parses the numeric value that follows it. It is written as a manual case-insensitive substring search rather than using \inlinecode{strstr} directly, because HTTP header names are defined by the specification to be \textbf{case-insensitive} --- a server could legally send \texttt{content-length}, \texttt{Content-Length}, or even \texttt{CONTENT-LENGTH}, and a correct client must recognize all of them identically.
+
+The outer \inlinecode{while (*p)} loop advances one character at a time through the header text, treating each position as a candidate starting point. At each candidate position, the inner loop compares up to \inlinecode{target\_len} characters, converting each byte from the input to lowercase with \inlinecode{tolower()} before comparing it against the corresponding (already-lowercase) character of the literal \texttt{"content-length:"}. If the inner loop runs to completion (\inlinecode{i == target\_len}), a full case-insensitive match has been found at this position, and \inlinecode{atol} parses the digits immediately following the colon into a \inlinecode{long}. If no match is found at the current position, the outer loop simply advances \inlinecode{p} by one and tries again.
+
+\begin{warnbox}
+\inlinecode{tolower()} technically expects an \inlinecode{int} argument that is either \inlinecode{EOF} or representable as an \inlinecode{unsigned char}; passing a plain (possibly signed) \inlinecode{char} directly can trigger undefined behavior on platforms where \inlinecode{char} is signed and the byte value is negative (e.g.\ certain non-ASCII bytes). The explicit cast \inlinecode{(unsigned char)p[i]} guards against this and is considered best practice whenever calling \inlinecode{tolower}, \inlinecode{toupper}, or similar \texttt{<ctype.h>} functions on raw \inlinecode{char} data.
+\end{warnbox}
+
+If the header is never found (for instance, in a response with an empty body and no \texttt{Content-Length} at all), the function returns \texttt{-1}, a sentinel value the caller checks for before printing any diagnostic about the declared length.
+
+\section{\texttt{main}: Request Construction}
+
+\begin{lstlisting}[style=cstyle]
+int main(int argc, char *argv[]) {
+    if (argc < 4) {
+        fprintf(stderr, "Usage: %s <host> <port> <path>\n", argv[0]);
+        fprintf(stderr, "Example: %s localhost 8080 /\n", argv[0]);
+        return 1;
+    }
+
+    const char *host = argv[1];
+    int port = atoi(argv[2]);
+    const char *path = argv[3];
+
+    int fd = connect_to_server(host, port);
+    if (fd < 0) {
+        fprintf(stderr, "Failed to connect to %s:%d\n", host, port);
+        return 1;
+    }
+
+    char request[1024];
+    int req_len = snprintf(request, sizeof(request),
+        "GET %s HTTP/1.1\r\n"
+        "Host: %s\r\n"
+        "Connection: close\r\n"
+        "\r\n",
+        path, host);
+
+    if (send_all(fd, request, (size_t)req_len) != 0) {
+        fprintf(stderr, "Failed to send request\n");
+        close(fd);
+        return 1;
+    }
+\end{lstlisting}
+
+Unlike the Gopher client (Chapter~\ref{chap:gopher-client}), which requires host, port, and an \emph{optional} selector, this client requires all three arguments (\inlinecode{argc < 4}), since an HTTP request without a path is not meaningful in the same way an empty Gopher selector is. The request is built as a single well-formed HTTP/1.1 GET request (per the format defined in Chapter~\ref{chap:http-protocol}), including a mandatory \texttt{Host} header --- required by the HTTP/1.1 specification for every request, since a single server process may serve multiple domain names on the same IP address --- and a \texttt{Connection: close} header, explicitly telling the server this client does not support persistent connections either, matching the server's own behavior (Chapter~\ref{chap:http-server}).
+
+\section{\texttt{main}: Reading and Splitting the Response}
+
+\begin{lstlisting}[style=cstyle]
+    size_t total_len = 0;
+    char *response = read_until_close(fd, &total_len);
+    close(fd);
+
+    if (!response) {
+        fprintf(stderr, "Failed to read response\n");
+        return 1;
+    }
+\end{lstlisting}
+
+\begin{note}
+This client reuses \inlinecode{read\_until\_close} --- the same function the Gopher client uses --- rather than implementing the more general ``read headers, then read exactly \texttt{Content-Length} more bytes'' pattern described in Chapter~\ref{chap:http-protocol}. This works correctly here \emph{only because} the request explicitly sent \texttt{Connection: close}, and this project's server (Chapter~\ref{chap:http-server}) honors that header by always closing the connection after one response. If this client needed to talk to a real-world, keep-alive-capable server, it would need to switch to reading incrementally and stopping as soon as the declared \texttt{Content-Length} bytes have been received, rather than waiting for the connection to close (which, under keep-alive, it might not, for a long time).
+\end{note}
+
+\begin{lstlisting}[style=cstyle]
+    char *headers_end = find_headers_end(response, total_len);
+    if (!headers_end) {
+        fprintf(stderr, "Invalid response: no clear end of headers\n");
+        free(response);
+        return 1;
+    }
+
+    size_t headers_len = (size_t)(headers_end - response);
+    char *body_start = headers_end + 4;
+    size_t body_len_from_socket = total_len - headers_len - 4;
+\end{lstlisting}
+
+Once the full raw response has been read into \inlinecode{response}, \inlinecode{find\_headers\_end} locates the \texttt{\textbackslash r\textbackslash n\textbackslash r\textbackslash n} boundary. Pointer subtraction (\inlinecode{headers\_end - response}) yields \inlinecode{headers\_len}, the number of bytes occupied by the status line and headers. \inlinecode{body\_start} is computed by advancing four bytes past the boundary pointer (skipping over the \texttt{\textbackslash r\textbackslash n\textbackslash r\textbackslash n} sequence itself), and \inlinecode{body\_len\_from\_socket} is derived arithmetically as ``everything else'': the total bytes received, minus the header bytes, minus the four boundary bytes.
+
+\section{\texttt{main}: Printing and the Length Cross-Check}
+
+\begin{lstlisting}[style=cstyle]
+    printf("--- Headers ---\n");
+    fwrite(response, 1, headers_len, stdout);
+    printf("\n\n");
+
+    long declared_len = parse_content_length(response);
+    if (declared_len >= 0) {
+        printf("--- Declared Content-Length: %ld, actually received: %zu ---\n",
+               declared_len, body_len_from_socket);
+    }
+
+    printf("--- Body ---\n");
+    fwrite(body_start, 1, body_len_from_socket, stdout);
+    printf("\n");
+
+    free(response);
+    return 0;
+}
+\end{lstlisting}
+
+\inlinecode{fwrite} is used instead of \inlinecode{printf("\%s", ...)} to print the headers and body sections, because both are byte ranges of a known, explicit length rather than null-terminated strings --- again correctly handling the possibility of embedded null bytes in binary content, consistent with the byte-oriented approach taken throughout this file.
+
+The diagnostic line comparing \inlinecode{declared\_len} (parsed from the \texttt{Content-Length} header itself) against \inlinecode{body\_len\_from\_socket} (independently computed from the raw byte count actually received over the socket) is not strictly necessary for the client to function, but is included deliberately as a pedagogical cross-check: when the server is implemented correctly, these two numbers will always agree, which is a direct, observable confirmation that the framing logic on both ends of the connection is behaving as the protocol requires. Chapter~\ref{chap:testing} shows this cross-check succeeding in practice, and discusses what a discrepancy between the two numbers would indicate about a bug in either the server or the client.
+
+Finally, \inlinecode{free(response)} releases the buffer allocated inside \inlinecode{read\_until\_close}, matching the ownership contract documented in Chapter~\ref{chap:socket-utils}.

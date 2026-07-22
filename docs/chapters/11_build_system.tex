@@ -1,0 +1,109 @@
+\chapter{The Build System: \texttt{Makefile}}
+\label{chap:build-system}
+
+\section{Full Listing}
+
+\begin{lstlisting}[style=bashstyle, numbers=left]
+CC = gcc
+CFLAGS = -Wall -Wextra -g -std=c11
+
+COMMON = common/socket_utils.c
+
+.PHONY: all clean run-gopher-server run-http-server
+
+all: gopher_server gopher_client http_server http_client
+
+gopher_server: gopher/gopher_server.c $(COMMON)
+	$(CC) $(CFLAGS) -o gopher_server gopher/gopher_server.c $(COMMON)
+
+gopher_client: gopher/gopher_client.c $(COMMON)
+	$(CC) $(CFLAGS) -o gopher_client gopher/gopher_client.c $(COMMON)
+
+http_server: http/http_server.c $(COMMON)
+	$(CC) $(CFLAGS) -o http_server http/http_server.c $(COMMON)
+
+http_client: http/http_client.c $(COMMON)
+	$(CC) $(CFLAGS) -o http_client http/http_client.c $(COMMON)
+
+run-gopher-server: gopher_server
+	./gopher_server
+
+run-http-server: http_server
+	./http_server
+
+clean:
+	rm -f gopher_server gopher_client http_server http_client
+\end{lstlisting}
+
+\section{Variables}
+
+\begin{lstlisting}[style=bashstyle, numbers=none]
+CC = gcc
+CFLAGS = -Wall -Wextra -g -std=c11
+COMMON = common/socket_utils.c
+\end{lstlisting}
+
+\inlinecode{CC} names the compiler to invoke; keeping it as a variable (rather than hard-coding \texttt{gcc} in every rule) means a reader could override it at invocation time, e.g.\ \inlinecode{make CC=clang}, without editing the file. \inlinecode{CFLAGS} defines the compiler flags used uniformly across every target:
+
+\begin{center}
+\begin{tabularx}{\textwidth}{l X}
+\toprule
+\textbf{Flag} & \textbf{Meaning} \\
+\midrule
+\inlinecode{-Wall} & Enable a broad set of common compiler warnings. \\
+\inlinecode{-Wextra} & Enable additional warnings not covered by \inlinecode{-Wall}. \\
+\inlinecode{-g} & Include debugging symbols in the binary, enabling use of tools like \inlinecode{gdb}. \\
+\inlinecode{-std=c11} & Compile strictly against the C11 language standard (see also the discussion of \inlinecode{\_POSIX\_C\_SOURCE} in Chapter~\ref{chap:socket-utils}, needed precisely because this flag disables POSIX extensions by default). \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+\inlinecode{COMMON} stores the path to the shared utility source file, since it appears as a dependency and compilation input in all four executable targets --- defining it once avoids repeating the literal path four times and centralizes any future rename.
+
+\section{The \texttt{.PHONY} Declaration}
+
+\begin{lstlisting}[style=bashstyle, numbers=none]
+.PHONY: all clean run-gopher-server run-http-server
+\end{lstlisting}
+
+By default, \inlinecode{make} treats every target name as though it \emph{might} correspond to a file it should check the existence and modification time of. \inlinecode{.PHONY} tells \inlinecode{make} that the listed targets are not actual files, so it should always execute their recipes when invoked, regardless of whether a file with that name happens to exist in the working directory. This matters concretely here: without declaring \inlinecode{clean} as phony, if a file literally named \texttt{clean} ever existed in the project directory, \inlinecode{make clean} would silently do nothing, since \inlinecode{make} would see the (unrelated) file already exists and consider the target up to date.
+
+\section{The \texttt{all} Target and Dependency-Based Builds}
+
+\begin{lstlisting}[style=bashstyle, numbers=none]
+all: gopher_server gopher_client http_server http_client
+\end{lstlisting}
+
+\inlinecode{all} has no recipe of its own; it exists purely to depend on all four executables. Running \inlinecode{make} with no arguments builds the first target defined in the file by convention, which is \inlinecode{all} here, causing every executable to be built (or rebuilt, if sources changed) in one command.
+
+\begin{lstlisting}[style=bashstyle, numbers=none]
+gopher_server: gopher/gopher_server.c $(COMMON)
+	$(CC) $(CFLAGS) -o gopher_server gopher/gopher_server.c $(COMMON)
+\end{lstlisting}
+
+Each executable target follows the same pattern: the target name is followed by its \emph{prerequisites} (the source files it depends on), and the indented line beneath is the \emph{recipe} --- the shell command \inlinecode{make} runs to actually produce the target. \inlinecode{make}'s core feature is that it compares the modification timestamp of the target file against each of its prerequisites, and only re-runs the recipe if the target is missing or older than at least one prerequisite. In practice, this means editing only \texttt{gopher\_server.c} and running \inlinecode{make all} will recompile \inlinecode{gopher\_server} but correctly skip recompiling \inlinecode{http\_server}, \inlinecode{http\_client}, and \inlinecode{gopher\_client}, since their own source files are unchanged --- a significant time saver as a project grows, even though the benefit is modest at this project's small scale.
+
+\begin{warnbox}
+Every recipe line in a \inlinecode{Makefile} \textbf{must} begin with a literal tab character, not spaces. This is a long-standing and frequently-encountered \inlinecode{make} pitfall: a recipe line indented with spaces produces the error \texttt{missing separator}, and many text editors silently convert leading tabs to spaces unless configured not to. If cloning or hand-copying this \texttt{Makefile}, this detail is worth double-checking if \inlinecode{make} reports that error.
+\end{warnbox}
+
+\section{Convenience Targets: \texttt{run-gopher-server} and \texttt{run-http-server}}
+
+\begin{lstlisting}[style=bashstyle, numbers=none]
+run-gopher-server: gopher_server
+	./gopher_server
+
+run-http-server: http_server
+	./http_server
+\end{lstlisting}
+
+These targets depend on the corresponding executable, so \inlinecode{make} automatically builds it first if necessary (or if source files have changed since the last build), and then immediately runs it in the foreground. This is a convenience for quick local testing but has a practical limitation: since the recipe simply runs \texttt{./gopher\_server} with no arguments, the server always uses its compiled-in default content directory (\texttt{gopher\_root} or \texttt{www}) and therefore must be invoked with \inlinecode{make} from \emph{within} the corresponding protocol subdirectory to find that directory correctly --- the precise gotcha documented in detail in Chapter~\ref{chap:running-on-linux}.
+
+\section{The \texttt{clean} Target}
+
+\begin{lstlisting}[style=bashstyle, numbers=none]
+clean:
+	rm -f gopher_server gopher_client http_server http_client
+\end{lstlisting}
+
+\inlinecode{clean} has no prerequisites, so running \inlinecode{make clean} always executes its recipe (subject to the \inlinecode{.PHONY} rule above, ensuring it is never skipped because a same-named file happens to exist). \inlinecode{-f} suppresses any error \inlinecode{rm} would otherwise produce if one of the listed files does not currently exist, making it safe to run \inlinecode{make clean} even on a directory that has never been built.

@@ -1,0 +1,60 @@
+\chapter{Introduction}
+
+\section{Purpose of This Project}
+
+This project implements two application-layer network protocols entirely from scratch in C, using nothing but the raw POSIX sockets API:
+
+\begin{itemize}
+    \item \textbf{Gopher} (RFC 1436) --- a minimalist document-retrieval protocol from 1991.
+    \item \textbf{HTTP/1.1} (a practical subset) --- the protocol underlying the modern web.
+\end{itemize}
+
+For each protocol, both a \textbf{server} and a \textbf{client} are implemented. No external networking libraries are used; every byte sent or received passes through hand-written code that calls directly into the operating system's socket layer (\inlinecode{socket()}, \inlinecode{bind()}, \inlinecode{listen()}, \inlinecode{accept()}, \inlinecode{connect()}, \inlinecode{send()}, \inlinecode{recv()}).
+
+\section{Why These Two Protocols Together}
+
+Gopher and HTTP were chosen deliberately as a pair, not arbitrarily:
+
+\begin{itemize}
+    \item \textbf{Gopher is almost the simplest possible TCP application protocol.} A request is a single line of text; a response is raw bytes followed by connection closure. There are no headers, no status codes, and no explicit content length. This makes it an ideal first target: it forces you to master the TCP connection lifecycle (\inlinecode{accept}/\inlinecode{connect}, \inlinecode{recv} loops, \inlinecode{send} loops, closing sockets) without the added complexity of message framing.
+
+    \item \textbf{HTTP adds exactly the complexity that Gopher lacks.} Once the TCP fundamentals are solid, HTTP introduces the next layer of concepts that essentially every real-world protocol needs: structured request/response lines, key--value headers, explicit content-length framing, and status codes. Implementing HTTP after Gopher means each new concept is introduced in isolation, rather than all at once.
+\end{itemize}
+
+The result is a natural progression: Chapter~\ref{chap:gopher-protocol} onward builds the simple case, and Chapter~\ref{chap:http-protocol} onward builds on top of the same socket primitives to handle the harder case.
+
+\section{Learning Goals}
+
+By the end of working through this project and this document, the reader should be able to:
+
+\begin{enumerate}
+    \item Explain the full lifecycle of a TCP server socket (\inlinecode{socket} $\to$ \inlinecode{bind} $\to$ \inlinecode{listen} $\to$ \inlinecode{accept}) and a TCP client socket (\inlinecode{socket} $\to$ \inlinecode{connect}).
+    \item Explain why \inlinecode{recv()} and \inlinecode{send()} do not guarantee delivering or accepting all requested bytes in a single call, and why loops are required around both.
+    \item Implement a simple line-based protocol (Gopher) that relies on connection closure to signal the end of a message.
+    \item Implement a framed protocol (HTTP) that relies on an explicit \inlinecode{Content-Length} header, including correctly separating headers from body in a byte stream.
+    \item Understand basic server-side input validation (e.g.\ path traversal protection) and why client-side behavior (e.g.\ URL normalization in \texttt{curl}) cannot be relied upon for security.
+    \item Build and run all of the above on a Linux system, including troubleshooting the most common pitfalls (buffering, working directory issues, background process management).
+\end{enumerate}
+
+\section{Prerequisites}
+
+The reader is assumed to have:
+\begin{itemize}
+    \item Working knowledge of C (pointers, structs, manual memory management with \inlinecode{malloc}/\inlinecode{free}).
+    \item Basic familiarity with the command line on Linux.
+    \item No prior networking experience is assumed --- Chapter~\ref{chap:networking-fundamentals} builds the necessary background from first principles.
+\end{itemize}
+
+\section{Document Structure}
+
+\begin{itemize}
+    \item \textbf{Chapter~\ref{chap:networking-fundamentals}} builds the conceptual foundation: what a socket is, the TCP three-way handshake, byte ordering, and blocking I/O.
+    \item \textbf{Chapter~\ref{chap:project-structure}} gives a bird's-eye view of the repository layout.
+    \item \textbf{Chapter~\ref{chap:socket-utils}} walks through the shared utility library used by every server and client in the project.
+    \item \textbf{Chapters~\ref{chap:gopher-protocol}--\ref{chap:gopher-client}} cover the Gopher protocol, server, and client in full detail.
+    \item \textbf{Chapters~\ref{chap:http-protocol}--\ref{chap:http-client}} cover HTTP in the same depth.
+    \item \textbf{Chapter~\ref{chap:build-system}} explains the \inlinecode{Makefile}.
+    \item \textbf{Chapter~\ref{chap:running-on-linux}} is a practical, copy-pasteable guide to building and running everything on Linux.
+    \item \textbf{Chapter~\ref{chap:testing}} documents how each component was verified to work correctly.
+    \item \textbf{Chapter~\ref{chap:limitations}} is an honest account of what this implementation deliberately does \emph{not} handle, and what a production-grade version would need to add.
+\end{itemize}

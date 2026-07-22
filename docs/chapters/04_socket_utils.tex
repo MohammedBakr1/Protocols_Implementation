@@ -1,0 +1,224 @@
+\chapter{The Shared Socket Utility Library}
+\label{chap:socket-utils}
+
+This chapter examines \texttt{common/socket\_utils.h} and \texttt{common/socket\_utils.c} in full detail. Every other C file in the project depends on this module, so a thorough understanding of it is a prerequisite for the rest of the document.
+
+\section{The Header File: \texttt{socket\_utils.h}}
+
+\begin{lstlisting}[style=cstyle]
+#ifndef SOCKET_UTILS_H
+#define SOCKET_UTILS_H
+
+int create_server_socket(int port, int backlog);
+int connect_to_server(const char *host, int port);
+char *read_until_close(int fd, size_t *out_len);
+int send_all(int fd, const char *buf, size_t len);
+
+#endif
+\end{lstlisting}
+
+\subsection{Include Guards}
+
+The \inlinecode{\#ifndef} / \inlinecode{\#define} / \inlinecode{\#endif} triplet is a standard \textbf{include guard}. If this header is accidentally included more than once within the same translation unit (which can happen indirectly through chains of includes), the guard prevents the compiler from seeing duplicate declarations, which would otherwise be a compile error.
+
+\subsection{The Four Declared Functions}
+
+\begin{center}
+\begin{tabularx}{\textwidth}{l X}
+\toprule
+\textbf{Function} & \textbf{Purpose} \\
+\midrule
+\inlinecode{create\_server\_socket} & Performs \inlinecode{socket}, \inlinecode{setsockopt}, \inlinecode{bind}, and \inlinecode{listen} in one call; returns a ready-to-\inlinecode{accept} listening file descriptor. \\
+\inlinecode{connect\_to\_server} & Performs \inlinecode{getaddrinfo}, \inlinecode{socket}, and \inlinecode{connect}; returns a connected file descriptor. \\
+\inlinecode{read\_until\_close} & Reads from a socket in a loop until the peer closes the connection (EOF), dynamically growing a heap buffer as needed. \\
+\inlinecode{send\_all} & Sends an entire buffer over a socket, looping as necessary to handle partial writes (see Section~\ref{sec:partial-io}). \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+\section{The Implementation File: \texttt{socket\_utils.c}}
+
+\subsection{Feature Test Macro and Includes}
+
+\begin{lstlisting}[style=cstyle]
+#define _POSIX_C_SOURCE 200809L
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include <errno.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include <netdb.h>
+#include "socket_utils.h"
+\end{lstlisting}
+
+The project is compiled with \inlinecode{-std=c11}, which tells GCC to expose only strictly-standard C library features and hide POSIX-specific extensions such as \inlinecode{getaddrinfo}. Defining \inlinecode{\_POSIX\_C\_SOURCE 200809L} \emph{before any header is included} explicitly requests the POSIX.1-2008 feature set, making functions like \inlinecode{getaddrinfo} and \inlinecode{gai\_strerror} visible again. This macro must appear before the very first \inlinecode{\#include} line to take effect correctly.
+
+\subsection{\texttt{create\_server\_socket}}
+
+\begin{lstlisting}[style=cstyle]
+int create_server_socket(int port, int backlog) {
+    int server_fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (server_fd < 0) {
+        perror("socket");
+        return -1;
+    }
+\end{lstlisting}
+
+Creates a TCP/IPv4 socket. \inlinecode{perror} prints a human-readable description of \inlinecode{errno} (the last system-call error code) prefixed with the given string, e.g. \texttt{socket: Too many open files}.
+
+\begin{lstlisting}[style=cstyle]
+    int opt = 1;
+    if (setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) < 0) {
+        perror("setsockopt");
+        close(server_fd);
+        return -1;
+    }
+\end{lstlisting}
+
+\inlinecode{SO\_REUSEADDR} allows the socket to bind to a port that is still nominally occupied by a recently-closed connection lingering in the \texttt{TIME\_WAIT} state. Without this option, restarting the server immediately after stopping it often fails with \texttt{Address already in use}, because the kernel reserves the port for a short grace period (typically up to a couple of minutes) to catch any stray packets from the previous connection.
+
+\begin{lstlisting}[style=cstyle]
+    struct sockaddr_in addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = INADDR_ANY;
+    addr.sin_port = htons(port);
+
+    if (bind(server_fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+        perror("bind");
+        close(server_fd);
+        return -1;
+    }
+\end{lstlisting}
+
+\inlinecode{struct sockaddr\_in} describes an IPv4 endpoint (address family, port, IP address). It is zero-initialized with \inlinecode{memset} first as defensive practice, since uninitialized padding bytes in the struct could otherwise contain garbage. \inlinecode{INADDR\_ANY} means ``bind to all available network interfaces on this machine'' (as opposed to a single specific IP). \inlinecode{htons(port)} converts the port number to network byte order, as explained in Section~\ref{sec:partial-io} of the previous chapter. The cast to \inlinecode{struct sockaddr~*} is required because the POSIX sockets API is written in terms of a generic address structure that specific address families (like \inlinecode{sockaddr\_in}) are meant to be cast to and from.
+
+\begin{lstlisting}[style=cstyle]
+    if (listen(server_fd, backlog) < 0) {
+        perror("listen");
+        close(server_fd);
+        return -1;
+    }
+
+    return server_fd;
+}
+\end{lstlisting}
+
+\inlinecode{listen} transitions the socket into passive (listening) mode. \inlinecode{backlog} bounds how many fully-established connections may queue up waiting for the program to call \inlinecode{accept()}; if the queue is full, further connection attempts may be refused or delayed by the kernel.
+
+\subsection{\texttt{connect\_to\_server}}
+
+\begin{lstlisting}[style=cstyle]
+int connect_to_server(const char *host, int port) {
+    struct addrinfo hints, *res;
+    memset(&hints, 0, sizeof(hints));
+    hints.ai_family = AF_INET;
+    hints.ai_socktype = SOCK_STREAM;
+
+    char port_str[16];
+    snprintf(port_str, sizeof(port_str), "%d", port);
+
+    int err = getaddrinfo(host, port_str, &hints, &res);
+    if (err != 0) {
+        fprintf(stderr, "getaddrinfo: %s\n", gai_strerror(err));
+        return -1;
+    }
+\end{lstlisting}
+
+Unlike the server, which always binds to \inlinecode{INADDR\_ANY} (a fixed numeric address), the client must resolve a possibly symbolic host name (e.g.\ \texttt{"localhost"} or \texttt{"example.com"}) into a concrete address. \inlinecode{getaddrinfo} performs this resolution --- including DNS lookups when necessary --- and is the modern, protocol-independent replacement for older functions like \inlinecode{gethostbyname}. It takes the port as a \emph{string}, hence the \inlinecode{snprintf} conversion. On success, \inlinecode{res} points to a linked list of candidate addresses; this project simply uses the first one.
+
+\begin{lstlisting}[style=cstyle]
+    int fd = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
+    if (fd < 0) {
+        perror("socket");
+        freeaddrinfo(res);
+        return -1;
+    }
+
+    if (connect(fd, res->ai_addr, res->ai_addrlen) < 0) {
+        perror("connect");
+        close(fd);
+        freeaddrinfo(res);
+        return -1;
+    }
+
+    freeaddrinfo(res);
+    return fd;
+}
+\end{lstlisting}
+
+The socket is created using the family/type/protocol values \emph{returned by} \inlinecode{getaddrinfo} rather than hard-coded constants, which keeps the code correct even if \inlinecode{hints} were later relaxed to allow IPv6. \inlinecode{connect} performs the TCP three-way handshake. \inlinecode{freeaddrinfo} releases the linked list allocated by \inlinecode{getaddrinfo}; note it must be called on \emph{every} exit path, including the error paths, to avoid a memory leak.
+
+\subsection{\texttt{read\_until\_close}}
+
+This function implements the Gopher-style ``read until the peer disconnects'' pattern discussed in Section~\ref{sec:partial-io}.
+
+\begin{lstlisting}[style=cstyle]
+char *read_until_close(int fd, size_t *out_len) {
+    size_t capacity = 4096;
+    size_t len = 0;
+    char *buf = malloc(capacity);
+    if (!buf) return NULL;
+
+    while (1) {
+        if (len + 1024 > capacity) {
+            capacity *= 2;
+            char *new_buf = realloc(buf, capacity);
+            if (!new_buf) {
+                free(buf);
+                return NULL;
+            }
+            buf = new_buf;
+        }
+\end{lstlisting}
+
+The buffer starts at 4096 bytes and doubles in size whenever fewer than 1024 bytes of headroom remain. Doubling (rather than growing by a fixed increment) is the standard amortized-growth strategy used by dynamic arrays: it keeps the total number of \inlinecode{realloc} calls logarithmic in the final size, rather than linear.
+
+\begin{warnbox}
+If \inlinecode{realloc} fails, the old \inlinecode{buf} pointer is still valid, but the return value \inlinecode{new\_buf} is \inlinecode{NULL}. Overwriting \inlinecode{buf} directly with the result of a failed \inlinecode{realloc} would leak the original allocation. This code correctly checks \inlinecode{new\_buf} before reassigning \inlinecode{buf}.
+\end{warnbox}
+
+\begin{lstlisting}[style=cstyle]
+        ssize_t n = recv(fd, buf + len, capacity - len - 1, 0);
+        if (n < 0) {
+            perror("recv");
+            free(buf);
+            return NULL;
+        }
+        if (n == 0) {
+            break;
+        }
+        len += (size_t)n;
+    }
+
+    buf[len] = '\0';
+    if (out_len) *out_len = len;
+    return buf;
+}
+\end{lstlisting}
+
+The read request size is \inlinecode{capacity - len - 1}, deliberately reserving one byte so a null terminator can always be appended afterward, even though the data itself may be binary and the null terminator is mostly a convenience for treating text responses as C strings. \inlinecode{n == 0} is the defining signal of a clean connection close (end-of-file on the socket) and is what allows this function to know when the peer is finished sending. \inlinecode{n < 0} indicates a genuine error (inspect \inlinecode{errno} for the cause).
+
+The caller receives ownership of the heap-allocated buffer and is responsible for calling \inlinecode{free()} on it --- exactly as documented in the header comment.
+
+\subsection{\texttt{send\_all}}
+
+\begin{lstlisting}[style=cstyle]
+int send_all(int fd, const char *buf, size_t len) {
+    size_t sent_total = 0;
+    while (sent_total < len) {
+        ssize_t n = send(fd, buf + sent_total, len - sent_total, 0);
+        if (n < 0) {
+            perror("send");
+            return -1;
+        }
+        sent_total += (size_t)n;
+    }
+    return 0;
+}
+\end{lstlisting}
+
+This is a direct implementation of the partial-write loop introduced in Section~\ref{sec:partial-io}. \inlinecode{buf + sent\_total} advances the pointer past the bytes already sent, and \inlinecode{len - sent\_total} shrinks the remaining request size accordingly, so each iteration sends only what is left. The loop terminates once \inlinecode{sent\_total} reaches \inlinecode{len}, guaranteeing (barring an error) that the entire buffer has been transmitted before the function returns.

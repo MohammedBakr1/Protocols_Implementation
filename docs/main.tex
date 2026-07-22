@@ -1,0 +1,158 @@
+\documentclass[11pt,a4paper]{report}
+
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage[margin=1in]{geometry}
+\usepackage{xcolor}
+\usepackage{listings}
+\usepackage{fancyhdr}
+\usepackage{titlesec}
+\usepackage{hyperref}
+\usepackage{tcolorbox}
+\usepackage{graphicx}
+\usepackage{enumitem}
+\usepackage{tabularx}
+\usepackage{booktabs}
+\usepackage{amsmath}
+\usepackage{tikz}
+\usetikzlibrary{arrows.meta, positioning, shapes.geometric}
+\usepackage{float}
+\usepackage{parskip}
+
+
+\definecolor{codebg}{RGB}{245,245,245}
+\definecolor{codekeyword}{RGB}{0,0,180}
+\definecolor{codecomment}{RGB}{100,100,100}
+\definecolor{codestring}{RGB}{163,21,21}
+\definecolor{titleblue}{RGB}{20,60,120}
+\definecolor{notebg}{RGB}{235,245,255}
+\definecolor{warnbg}{RGB}{255,240,235}
+
+
+\lstdefinestyle{cstyle}{
+    backgroundcolor=\color{codebg},
+    commentstyle=\color{codecomment}\itshape,
+    keywordstyle=\color{codekeyword}\bfseries,
+    stringstyle=\color{codestring},
+    basicstyle=\ttfamily\footnotesize,
+    breakatwhitespace=false,
+    breaklines=true,
+    captionpos=b,
+    keepspaces=true,
+    numbers=left,
+    numbersep=8pt,
+    numberstyle=\tiny\color{gray},
+    showspaces=false,
+    showstringspaces=false,
+    showtabs=false,
+    tabsize=4,
+    frame=single,
+    rulecolor=\color{gray!40},
+    xleftmargin=15pt,
+    language=C
+}
+\lstset{style=cstyle}
+
+\lstdefinestyle{bashstyle}{
+    backgroundcolor=\color{codebg},
+    basicstyle=\ttfamily\footnotesize,
+    breaklines=true,
+    frame=single,
+    rulecolor=\color{gray!40},
+    xleftmargin=15pt,
+    language=bash,
+    commentstyle=\color{codecomment}\itshape,
+    keywordstyle=\color{codekeyword}\bfseries,
+    stringstyle=\color{codestring},
+}
+
+
+\newtcolorbox{note}{
+    colback=notebg, colframe=titleblue!60, boxrule=0.5pt,
+    left=6pt, right=6pt, top=4pt, bottom=4pt,
+    title=\textbf{Note}, fonttitle=\bfseries, coltitle=titleblue
+}
+\newtcolorbox{warnbox}{
+    colback=warnbg, colframe=orange!70!black, boxrule=0.5pt,
+    left=6pt, right=6pt, top=4pt, bottom=4pt,
+    title=\textbf{Common Pitfall}, fonttitle=\bfseries, coltitle=orange!70!black
+}
+
+
+\pagestyle{fancy}
+\fancyhf{}
+\fancyhead[L]{\small\leftmark}
+\fancyhead[R]{\small\thepage}
+\renewcommand{\headrulewidth}{0.4pt}
+
+
+\titleformat{\chapter}[display]
+  {\normalfont\huge\bfseries\color{titleblue}}
+  {\chaptertitlename\ \thechapter}{20pt}{\Huge}
+\titleformat{\section}
+  {\normalfont\Large\bfseries\color{titleblue}}
+  {\thesection}{1em}{}
+\titleformat{\subsection}
+  {\normalfont\large\bfseries\color{titleblue!80}}
+  {\thesubsection}{1em}{}
+
+
+\hypersetup{
+    colorlinks=true,
+    linkcolor=titleblue,
+    citecolor=titleblue,
+    urlcolor=titleblue,
+    pdftitle={Protocols Implementation: HTTP and Gopher from Scratch in C},
+    pdfauthor={Mohammed Bakr},
+    pdfsubject={Systems Programming, Networking, Sockets},
+}
+
+\newcommand{\inlinecode}[1]{\texttt{\textcolor{titleblue!80}{#1}}}
+
+\title{
+    \vspace{-2cm}
+    {\Huge \textbf{Protocols Implementation}}\\[0.5em]
+    {\Large HTTP and Gopher Protocols from Scratch in C}\\[1em]
+    {\large A Line-by-Line Technical Walkthrough}
+}
+\author{Mohammed Bakr}
+\date{\today}
+
+\begin{document}
+
+\maketitle
+\thispagestyle{empty}
+
+\begin{center}
+\vspace{2cm}
+\begin{tcolorbox}[colback=notebg, colframe=titleblue!60, width=0.8\textwidth, boxrule=0.5pt]
+\textbf{Repository:} \url{https://github.com/MohammedBakr1/Protocols_Implementation}\\
+\textbf{Language:} C (C11 standard)\\
+\textbf{Platform:} Linux (POSIX sockets API)\\
+\textbf{License:} MIT
+\end{tcolorbox}
+\end{center}
+
+\newpage
+\thispagestyle{empty}
+\tableofcontents
+
+\newpage
+
+\input{chapters/01_introduction}
+\input{chapters/02_networking_fundamentals}
+\input{chapters/03_project_structure}
+\input{chapters/04_socket_utils}
+\input{chapters/05_gopher_protocol}
+\input{chapters/06_gopher_server}
+\input{chapters/07_gopher_client}
+\input{chapters/08_http_protocol}
+\input{chapters/09_http_server}
+\input{chapters/10_http_client}
+\input{chapters/11_build_system}
+\input{chapters/12_running_on_linux}
+\input{chapters/13_testing}
+\input{chapters/14_limitations_future_work}
+
+\end{document}

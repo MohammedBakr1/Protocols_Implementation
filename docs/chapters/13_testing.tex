@@ -1,0 +1,175 @@
+\chapter{Testing and Verification}
+\label{chap:testing}
+
+This chapter documents how each component of this project was actually verified to behave correctly. All results shown reflect real test runs performed against the compiled binaries, not hypothetical output.
+
+\section{Gopher Server: Manual Verification}
+
+With the server running (\texttt{./gopher\_server gopher\_root} from within \texttt{gopher/}), the root menu was requested by sending an empty selector:
+
+\begin{lstlisting}[style=bashstyle, numbers=none]
+$ python3 -c "
+import socket
+s = socket.create_connection(('localhost', 7070))
+s.sendall(b'\r\n')
+print(s.recv(4096).decode())
+"
+1Welcome Menu	README	localhost	7070
+0About this server	about.txt	localhost	7070
+.
+\end{lstlisting}
+
+This confirms the menu format matches the specification described in Chapter~\ref{chap:gopher-protocol}: tab-separated fields, correct type characters, and the terminating \texttt{.} line.
+
+Requesting an existing file and a nonexistent file were both verified:
+
+\begin{lstlisting}[style=bashstyle, numbers=none]
+$ ./gopher_client localhost 7070 about.txt
+This is a sample Gopher file served over TCP.
+.
+
+$ ./gopher_client localhost 7070 nope.txt
+3File not found
+.
+\end{lstlisting}
+
+The server's own log confirmed each request was received and dispatched correctly:
+\begin{lstlisting}[style=bashstyle, numbers=none]
+[gopher] New connection from 127.0.0.1
+[gopher] selector requested: "about.txt"
+[gopher] New connection from 127.0.0.1
+[gopher] selector requested: "nope.txt"
+\end{lstlisting}
+
+\section{Gopher Client Against the Gopher Server: End-to-End}
+
+With the compiled \texttt{gopher\_client} (rather than an ad-hoc Python script) run against the compiled \texttt{gopher\_server}, all cases behaved identically to the manual tests above, and additionally the client's own argument-validation was exercised:
+
+\begin{lstlisting}[style=bashstyle, numbers=none]
+$ ./gopher_client
+Usage: ./gopher_client <host> <port> [selector]
+Example: ./gopher_client localhost 7070 about.txt
+$ echo $?
+1
+\end{lstlisting}
+
+This confirms the client correctly detects missing required arguments, prints a usage message to \texttt{stderr}, and exits with a nonzero status code --- the standard convention for signaling failure to calling shell scripts or automated tooling.
+
+\section{HTTP Server: Status Codes and Headers}
+
+With the server running (\texttt{./http\_server www} from within \texttt{http/}), each supported response path was exercised with \texttt{curl -i} (which prints response headers):
+
+\begin{lstlisting}[style=bashstyle, numbers=none]
+$ curl -s -i http://localhost:8080/
+HTTP/1.1 200 OK
+Content-Type: text/html
+Content-Length: 175
+Connection: close
+
+<!DOCTYPE html>
+...
+
+$ curl -s -i http://localhost:8080/notfound.html
+HTTP/1.1 404 Not Found
+Content-Type: text/html
+Content-Length: 48
+Connection: close
+
+<html><body><h1>404 Not Found</h1></body></html>
+
+$ curl -s -i -X POST http://localhost:8080/
+HTTP/1.1 405 Method Not Allowed
+...
+\end{lstlisting}
+
+Each response's \inlinecode{Content-Length} header was confirmed to match the actual byte length of the body that followed, verifying the header-writing logic in \inlinecode{send\_response} (Chapter~\ref{chap:http-server}).
+
+\section{The Path-Traversal Test: A Worked Example of a Misleading Result}
+
+This test is documented in detail because the first attempt produced a result that looked like a failure but was not.
+
+\textbf{First attempt}, using \texttt{curl}:
+\begin{lstlisting}[style=bashstyle, numbers=none]
+$ curl -s -i "http://localhost:8080/../etc/passwd"
+HTTP/1.1 404 Not Found
+...
+\end{lstlisting}
+
+At first glance, this looks wrong: the expectation was a \texttt{400 Bad Request} from the path-traversal check in \inlinecode{serve\_file} (Chapter~\ref{chap:http-server}). As explained in Issue 5 of Chapter~\ref{chap:running-on-linux}, the actual cause is that \texttt{curl} normalizes \texttt{..} segments out of the URL \emph{before} sending the request, so the server never actually receives a path containing \texttt{".."}.
+
+\textbf{Second attempt}, bypassing \texttt{curl}'s normalization by sending a raw request directly over a socket:
+\begin{lstlisting}[style=bashstyle, numbers=none]
+$ python3 -c "
+import socket
+s = socket.create_connection(('localhost', 8080), timeout=3)
+s.sendall(b'GET /../../etc/passwd HTTP/1.1\r\nHost: localhost\r\n\r\n')
+print(s.recv(4096).decode())
+"
+HTTP/1.1 400 Bad Request
+Content-Type: text/html
+Content-Length: 50
+Connection: close
+
+<html><body><h1>400 Bad Request</h1></body></html>
+\end{lstlisting}
+
+This confirms the defense works correctly against a request that actually contains the literal \texttt{".."} substring the check is designed to catch. The server's log for this session shows both requests clearly, including the un-normalized path exactly as sent:
+
+\begin{lstlisting}[style=bashstyle, numbers=none]
+[http] GET /etc/passwd
+[http] GET /../../etc/passwd
+\end{lstlisting}
+
+\begin{note}
+This worked example is preserved here deliberately, rather than only showing the final passing test, because the debugging process --- recognizing that an apparently-failing test was actually a client-side artifact, and constructing a more direct test to isolate the real behavior --- is itself a core skill this project is meant to build.
+\end{note}
+
+\section{HTTP Client: Framing Verification}
+
+The compiled \texttt{http\_client} was run against the compiled \texttt{http\_server} for each response type, with particular attention to the declared-vs-received length cross-check described in Chapter~\ref{chap:http-client}:
+
+\begin{lstlisting}[style=bashstyle, numbers=none]
+$ ./http_client localhost 8080 /
+--- Headers ---
+HTTP/1.1 200 OK
+Content-Type: text/html
+Content-Length: 175
+Connection: close
+
+--- Declared Content-Length: 175, actually received: 175 ---
+--- Body ---
+<!DOCTYPE html>
+...
+
+$ ./http_client localhost 8080 /about.txt
+...
+--- Declared Content-Length: 24, actually received: 24 ---
+...
+
+$ ./http_client localhost 8080 /notfound.html
+...
+--- Declared Content-Length: 48, actually received: 48 ---
+...
+\end{lstlisting}
+
+In every case, the \texttt{Content-Length} value parsed from the response headers exactly matched the number of body bytes independently computed from the raw socket data (\inlinecode{body\_len\_from\_socket} in \texttt{http\_client.c}). This is the concrete, observable confirmation that the framing logic described conceptually in Chapter~\ref{chap:http-protocol} (Section~\ref{sec:http-framing}) and implemented in Chapters~\ref{chap:http-server} and~\ref{chap:http-client} is correct on both ends of the connection.
+
+\section{Summary of Verified Behavior}
+
+\begin{center}
+\begin{tabularx}{\textwidth}{X l}
+\toprule
+\textbf{Behavior} & \textbf{Result} \\
+\midrule
+Gopher root menu format & Correct (tab-separated, correct types) \\
+Gopher file retrieval (existing file) & Correct \\
+Gopher file retrieval (missing file) & Correct (type-3 error) \\
+Gopher client argument validation & Correct (usage message, exit code 1) \\
+HTTP 200 response with correct headers & Correct \\
+HTTP 404 for missing file & Correct \\
+HTTP 405 for non-GET method & Correct \\
+HTTP path-traversal defense (raw request) & Correct (400 Bad Request) \\
+HTTP client Content-Length cross-check & Correct in all tested cases \\
+\bottomrule
+\end{tabularx}
+\end{center}

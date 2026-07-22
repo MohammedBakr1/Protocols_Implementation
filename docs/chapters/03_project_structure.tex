@@ -1,0 +1,59 @@
+\chapter{Project Structure}
+\label{chap:project-structure}
+
+\section{Repository Layout}
+
+\begin{lstlisting}[style=bashstyle, numbers=none]
+Protocols_Implementation/
+|-- common/
+|   |-- socket_utils.h      Shared socket helper declarations
+|   `-- socket_utils.c      Shared socket helper implementation
+|-- gopher/
+|   |-- gopher_server.c     Gopher server
+|   |-- gopher_client.c     Gopher client
+|   `-- gopher_root/        Sample files served by the Gopher server
+|       |-- README
+|       `-- about.txt
+|-- http/
+|   |-- http_server.c       HTTP server
+|   |-- http_client.c       HTTP client
+|   `-- www/                Sample files served by the HTTP server
+|       |-- index.html
+|       `-- about.txt
+|-- docs/                   This LaTeX document and its compiled PDF
+|   |-- main.tex
+|   |-- chapters/
+|   `-- Protocols_Implementation.pdf
+|-- Makefile
+|-- README.md
+`-- LICENSE
+\end{lstlisting}
+
+\section{Design Rationale}
+
+\subsection{Why a Shared \texttt{common/} Module?}
+
+Both protocols' servers and clients need to perform the same low-level operations: create a listening socket, connect as a client, reliably send a buffer, and (for Gopher) read until the peer closes the connection. Rather than duplicating this logic four times, it is factored into \inlinecode{common/socket\_utils.c}, and every other file includes its header and links against its object file. This is standard C practice: a small, focused, reusable module with a clear interface (declared in the \texttt{.h} file) and a hidden implementation (in the \texttt{.c} file).
+
+\subsection{Why Separate Directories per Protocol?}
+
+Keeping \texttt{gopher/} and \texttt{http/} as separate directories, each with its own sample-content folder (\texttt{gopher\_root/} and \texttt{www/}), mirrors how real servers are typically organized: application code separate from the content it serves. It also keeps the two protocol implementations visually and organizationally independent, which matters for a project whose explicit purpose is pedagogical comparison between the two.
+
+\subsection{Four Independent \texttt{main()} Functions}
+
+This project intentionally builds four separate executables rather than one combined program with subcommands:
+
+\begin{center}
+\begin{tabularx}{\textwidth}{l l X}
+\toprule
+\textbf{Executable} & \textbf{Source file} & \textbf{Role} \\
+\midrule
+\texttt{gopher\_server} & \texttt{gopher/gopher\_server.c} & Listens on TCP port 7070, serves Gopher selectors \\
+\texttt{gopher\_client} & \texttt{gopher/gopher\_client.c} & Connects to a Gopher server and prints the response \\
+\texttt{http\_server} & \texttt{http/http\_server.c} & Listens on TCP port 8080, serves files over HTTP/1.1 \\
+\texttt{http\_client} & \texttt{http/http\_client.c} & Connects to an HTTP server, sends a GET request, parses the response \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+Each has its own \inlinecode{int main(int argc, char *argv[])}. This is why, when importing the project into an IDE such as Code::Blocks, it must be imported as a \emph{Makefile project} rather than a single ``C project'' --- a normal single-target C project expects exactly one \inlinecode{main()} across all its source files, and would fail to link with four.

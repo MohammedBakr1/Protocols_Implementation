@@ -1,0 +1,122 @@
+\chapter{Running on Linux}
+\label{chap:running-on-linux}
+
+This chapter is a practical, step-by-step guide to building and running this project on a Linux system, followed by a documented account of the real problems encountered while first bringing this project up, and how each was diagnosed and fixed. These are included deliberately: they are the kind of issue any reader is likely to hit when running similar code themselves.
+
+\section{Installing Prerequisites}
+
+On Debian/Ubuntu-based distributions:
+\begin{lstlisting}[style=bashstyle, numbers=none]
+sudo apt-get update
+sudo apt-get install -y build-essential
+\end{lstlisting}
+
+On Arch Linux:
+\begin{lstlisting}[style=bashstyle, numbers=none]
+sudo pacman -S base-devel
+\end{lstlisting}
+
+Either command installs \texttt{gcc}, \texttt{make}, and the standard set of tools needed to build C projects. No third-party libraries are required --- this project depends only on the C standard library and the POSIX sockets API, both provided by the base system.
+
+\section{Building}
+
+\begin{lstlisting}[style=bashstyle, numbers=none]
+cd Protocols_Implementation
+make all
+\end{lstlisting}
+
+This produces four executables in the repository root: \texttt{gopher\_server}, \texttt{gopher\_client}, \texttt{http\_server}, \texttt{http\_client}. Expect no warnings given the \inlinecode{-Wall -Wextra} flags in the \texttt{Makefile} (Chapter~\ref{chap:build-system}); any warning that does appear is worth investigating before proceeding.
+
+\section{Running the Gopher Server and Client}
+
+\textbf{Terminal 1} --- start the server, run from \emph{inside} the \texttt{gopher/} directory:
+\begin{lstlisting}[style=bashstyle, numbers=none]
+cd gopher
+../gopher_server gopher_root
+\end{lstlisting}
+
+\textbf{Terminal 2} --- run the client from the repository root:
+\begin{lstlisting}[style=bashstyle, numbers=none]
+cd Protocols_Implementation
+./gopher_client localhost 7070              # root menu
+./gopher_client localhost 7070 about.txt    # a specific file
+\end{lstlisting}
+
+\section{Running the HTTP Server and Client}
+
+\textbf{Terminal 1}:
+\begin{lstlisting}[style=bashstyle, numbers=none]
+cd http
+../http_server www
+\end{lstlisting}
+
+\textbf{Terminal 2}:
+\begin{lstlisting}[style=bashstyle, numbers=none]
+cd Protocols_Implementation
+./http_client localhost 8080 /
+./http_client localhost 8080 /about.txt
+
+# Or with curl / a browser:
+curl http://localhost:8080/
+# http://localhost:8080/ in any browser
+\end{lstlisting}
+
+Stopping either server is done with \texttt{Ctrl+C} in its terminal.
+
+\section{Documented Issues Encountered During Development}
+\label{sec:documented-issues}
+
+The following problems were all encountered, diagnosed, and fixed while originally building and testing this project. They are recorded here because each illustrates a general Linux/C development lesson, not just a one-off mistake.
+
+\subsection{Issue 1: \texttt{getaddrinfo} Undeclared Under \texttt{-std=c11}}
+
+\textbf{Symptom.} Compiling \texttt{socket\_utils.c} failed with the compiler unable to find declarations for \inlinecode{getaddrinfo} and related functions.
+
+\textbf{Cause.} The \texttt{Makefile} compiles with \texttt{-std=c11}, which restricts visible library declarations to the strict ISO C standard. POSIX-specific functions like \inlinecode{getaddrinfo} are hidden by default under this flag.
+
+\textbf{Fix.} Add \inlinecode{\#define \_POSIX\_C\_SOURCE 200809L} as the very first line of \texttt{socket\_utils.c}, before any \inlinecode{\#include} directive. This is discussed in depth in Chapter~\ref{chap:socket-utils}.
+
+\subsection{Issue 2: Background Server Processes Disappearing}
+
+\textbf{Symptom.} Starting a server with a trailing \texttt{\&} to run it in the background, then issuing further commands in what appeared to be the same shell session, resulted in the server process no longer running --- connection attempts failed with \texttt{Connection refused}.
+
+\textbf{Cause.} In some automated/scripted execution environments (and in some shell configurations), each command may execute in its own subshell or process group, meaning a plain backgrounded (\texttt{\&}) child process gets terminated when its parent shell instance exits at the end of that command, well before a subsequent command has a chance to talk to it.
+
+\textbf{Fix.} Launch the server with \inlinecode{setsid}, which starts the process in a new session, detached from the controlling terminal/shell's process group:
+\begin{lstlisting}[style=bashstyle, numbers=none]
+setsid ./gopher_server gopher_root > server.log 2>&1 < /dev/null &
+\end{lstlisting}
+This makes the server persist independently of whichever shell invocation launched it. In an interactive terminal session (the normal case for a human running this project directly), a simple \texttt{\&} is sufficient, since the terminal session itself persists across commands; \inlinecode{setsid} specifically matters for scripted or automated launches.
+
+\subsection{Issue 3: Server Output Not Appearing When Redirected to a File}
+
+\textbf{Symptom.} After solving Issue 2, the server's log file remained empty for a noticeable delay even though the server was confirmed to be running and successfully handling requests.
+
+\textbf{Cause.} The C standard library buffers \inlinecode{stdout} differently depending on whether it is connected to an interactive terminal (line-buffered: flushed after every newline) or to a file/pipe (fully buffered: flushed only when the internal buffer fills, or on program exit). Redirecting a server's output to a log file switches it into full buffering, so \inlinecode{printf} calls can sit in memory for a long time before actually being written to disk.
+
+\textbf{Fix.} Call \inlinecode{setvbuf(stdout, NULL, \_IONBF, 0);} near the start of \inlinecode{main()}, disabling buffering entirely so every \inlinecode{printf} call is flushed immediately. This is why both server programs include this call, as noted in Chapters~\ref{chap:gopher-server} and~\ref{chap:http-server}.
+
+\subsection{Issue 4: Gopher Server Returning ``File Not Found'' for Files That Exist}
+\label{sec:issue-cwd}
+
+\textbf{Symptom.} The Gopher server correctly served its root menu, but every attempt to fetch an actual file (e.g.\ \texttt{about.txt}) returned the type-\texttt{3} ``File not found'' error, even though the file was verifiably present on disk.
+
+\textbf{Cause.} The server initially hard-coded its content directory as the relative path \texttt{"./gopher\_root"}. A relative path is always resolved against the process's \textbf{current working directory} at the time the file is opened --- \emph{not} the directory containing the source file or the executable. The server had been launched from the repository root (\texttt{Protocols\_Implementation/}), not from inside \texttt{gopher/}, so \texttt{./gopher\_root} resolved to a nonexistent path relative to the root directory, rather than the intended \texttt{gopher/gopher\_root}.
+
+\textbf{Fix.} Two changes were made together: (1) the hard-coded path was replaced with a variable, \inlinecode{root\_dir}, defaulting to the bare name \texttt{"gopher\_root"} but overridable via \inlinecode{argv[1]}; and (2) the documented convention (see the running instructions earlier in this chapter) is to always launch the server from \emph{inside} its protocol subdirectory, explicitly passing the content directory name as an argument. This makes the dependency on the working directory explicit and controllable, rather than an invisible assumption baked into the binary.
+
+\begin{warnbox}
+This is a general lesson, not specific to this project: any C program that opens files using relative paths is implicitly depending on whatever directory it happens to be launched from. When debugging an unexpected ``file not found'' error in any C (or, indeed, any) program, checking the process's actual current working directory (on Linux, visible via \texttt{readlink /proc/\textless pid\textgreater/cwd}) is one of the first things worth verifying.
+\end{warnbox}
+
+\subsection{Issue 5: \texttt{curl} Appearing to Defeat the Path-Traversal Defense}
+
+\textbf{Symptom.} A request for \texttt{curl "http://localhost:8080/../etc/passwd"} was expected to trigger the server's \texttt{400 Bad Request} path-traversal check (Chapter~\ref{chap:http-server}), but instead returned a plain \texttt{404 Not Found}.
+
+\textbf{Cause.} This was not a bug in the server. \texttt{curl} performs URL \textbf{normalization} on the client side before ever sending the request: it collapses \texttt{..} segments in the path locally, so \texttt{/../etc/passwd} was transmitted over the wire as simply \texttt{/etc/passwd} --- a path that legitimately contains no \texttt{".."} substring by the time the server ever sees it, and therefore correctly does not trigger the traversal check (it instead correctly reports 404, since no such file exists under \texttt{www/}).
+
+\textbf{Resolution.} This was confirmed, not ``fixed,'' by sending a raw, unnormalized request directly over a socket (bypassing \texttt{curl}'s normalization) using a short Python script, which did correctly trigger the server's \texttt{400} response. This is documented further, with the exact verification method, in Chapter~\ref{chap:testing}.
+
+\begin{note}
+The lesson here generalizes: a server's security checks must be verified against the \emph{literal bytes} a client could send, not only against the behavior of one particular well-behaved client library. Different HTTP clients (browsers, \texttt{curl}, hand-written scripts, deliberately malicious tools) make different choices about normalization, and a server cannot assume any particular client-side sanitization has already happened before its request arrives.
+\end{note}

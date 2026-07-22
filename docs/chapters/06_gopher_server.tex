@@ -1,0 +1,164 @@
+\chapter{Line-by-Line: \texttt{gopher\_server.c}}
+\label{chap:gopher-server}
+
+\section{Includes and Constants}
+
+\begin{lstlisting}[style=cstyle]
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include "../common/socket_utils.h"
+
+#define PORT 7070
+
+static const char *root_dir = "gopher_root";
+\end{lstlisting}
+
+\inlinecode{PORT} is fixed at 7070 rather than the protocol's traditional port 70, because binding to any port below 1024 on Linux requires root (superuser) privileges. Using an unprivileged port lets the server run as a normal user. \inlinecode{root\_dir} is declared \inlinecode{static} (file-local, not exported) and mutable, because \inlinecode{main()} may override it from a command-line argument, as seen later in this chapter.
+
+\section{\texttt{send\_menu}: Building a Gopher Menu Response}
+
+\begin{lstlisting}[style=cstyle]
+static void send_menu(int client_fd) {
+    char response[8192] = {0};
+    size_t offset = 0;
+
+    offset += snprintf(response + offset, sizeof(response) - offset,
+        "1Welcome Menu\tREADME\tlocalhost\t%d\r\n", PORT);
+    offset += snprintf(response + offset, sizeof(response) - offset,
+        "0About this server\tabout.txt\tlocalhost\t%d\r\n", PORT);
+    offset += snprintf(response + offset, sizeof(response) - offset,
+        ".\r\n");
+
+    send_all(client_fd, response, offset);
+}
+\end{lstlisting}
+
+This function constructs a Gopher menu (Section~\ref{chap:gopher-protocol}) directly in a fixed-size stack buffer. The \inlinecode{offset += snprintf(...)} pattern is a common idiom for incrementally building a string: \inlinecode{snprintf} returns the number of characters it \emph{would have} written (excluding the null terminator), so accumulating these return values into \inlinecode{offset} tracks exactly how many bytes of \inlinecode{response} are currently in use, and \inlinecode{sizeof(response) - offset} correctly shrinks the remaining available space on each call, preventing any individual \inlinecode{snprintf} call from overflowing the buffer.
+
+Two hard-coded menu entries are produced: a directory-type entry (\texttt{1}) pointing at \texttt{README}, and a text-type entry (\texttt{0}) pointing at \texttt{about.txt}. Both entries advertise \texttt{localhost} and \texttt{PORT} as their host/port, meaning a compliant Gopher client following this menu would reconnect to this same server. The menu is terminated with the conventional \texttt{.\textbackslash r\textbackslash n} line, then transmitted in full using \inlinecode{send\_all} (Chapter~\ref{chap:socket-utils}) rather than a raw \inlinecode{send} call, guaranteeing the entire buffer reaches the client even if the kernel's socket buffer requires multiple underlying writes.
+
+\section{\texttt{send\_file}: Serving a Selector as a File}
+
+\begin{lstlisting}[style=cstyle]
+static void send_file(int client_fd, const char *selector) {
+    char path[512];
+    snprintf(path, sizeof(path), "%s/%s", root_dir, selector);
+
+    FILE *f = fopen(path, "r");
+    if (!f) {
+        const char *msg = "3File not found\r\n.\r\n";
+        send_all(client_fd, msg, strlen(msg));
+        return;
+    }
+\end{lstlisting}
+
+The requested \inlinecode{selector} is concatenated onto \inlinecode{root\_dir} to build a filesystem path, then opened with the standard C library's \inlinecode{fopen}. If the file does not exist (or cannot be opened for any other reason --- \inlinecode{fopen} does not distinguish), a Gopher-style error line is sent back using type \texttt{3}, per the convention introduced in Section~\ref{chap:gopher-protocol}.
+
+\begin{warnbox}
+This function performs no path-traversal validation on \inlinecode{selector}: a selector such as \texttt{../../../../etc/passwd} would be concatenated verbatim into \inlinecode{path} and, if readable by the server process, served without restriction. Contrast this with the HTTP server (Chapter~\ref{chap:http-server}), which explicitly checks for \texttt{".."} in the requested path. This is a deliberate simplification for the Gopher implementation, revisited in Chapter~\ref{chap:limitations}.
+\end{warnbox}
+
+\begin{lstlisting}[style=cstyle]
+    char buf[4096];
+    size_t n;
+    while ((n = fread(buf, 1, sizeof(buf), f)) > 0) {
+        send_all(client_fd, buf, n);
+    }
+    fclose(f);
+
+    send_all(client_fd, ".\r\n", 3);
+}
+\end{lstlisting}
+
+The file is streamed to the client in 4096-byte chunks rather than being read entirely into memory first. This is a deliberate memory-efficiency choice: it keeps the server's memory footprint bounded regardless of how large the requested file is, at the cost of one \inlinecode{fread}/\inlinecode{send\_all} pair per chunk. After the file's contents are fully sent, a trailing \texttt{.\textbackslash r\textbackslash n} is appended. Strictly, RFC~1436 only requires this terminator for menu-type (type \texttt{1}) responses, but sending it unconditionally here is a simplification that keeps the code path uniform, at the minor cost of appending two extraneous bytes to plain-text file downloads.
+
+\section{\texttt{handle\_client}: Parsing the Request and Dispatching}
+
+\begin{lstlisting}[style=cstyle]
+static void handle_client(int client_fd) {
+    char selector[512] = {0};
+    ssize_t n = recv(client_fd, selector, sizeof(selector) - 1, 0);
+    if (n <= 0) {
+        close(client_fd);
+        return;
+    }
+    selector[n] = '\0';
+\end{lstlisting}
+
+Because a Gopher request is always a single short line, this function reads it with one \inlinecode{recv} call rather than the general-purpose looping helpers from \texttt{socket\_utils.c}. This is a reasonable simplification given the protocol's guarantee that requests are small, but it does mean that a pathological client sending its selector across multiple very small TCP segments could, in principle, have its request split across more than one \inlinecode{recv} call --- a scenario this simplified handler does not account for. \inlinecode{n <= 0} handles both the ``client disconnected immediately'' (\texttt{n == 0}) and ``error'' (\texttt{n < 0}) cases identically, since in both situations there is no request to process.
+
+\begin{lstlisting}[style=cstyle]
+    char *cr = strpbrk(selector, "\r\n");
+    if (cr) *cr = '\0';
+
+    printf("[gopher] selector requested: \"%s\"\n", selector);
+\end{lstlisting}
+
+\inlinecode{strpbrk} searches \inlinecode{selector} for the \emph{first occurrence of any character} in the given set --- here, either \texttt{\textbackslash r} or \texttt{\textbackslash n}. If found, that character is overwritten with a null terminator, effectively trimming the trailing line ending sent by the client. This correctly handles clients that send either bare \texttt{\textbackslash n} or the protocol-correct \texttt{\textbackslash r\textbackslash n}.
+
+\begin{lstlisting}[style=cstyle]
+    if (strlen(selector) == 0) {
+        send_menu(client_fd);
+    } else {
+        send_file(client_fd, selector);
+    }
+
+    close(client_fd);
+}
+\end{lstlisting}
+
+This is the entire dispatch logic of the server: an empty selector (after trimming) requests the root menu; anything else is treated as a filename to serve. The connection is unconditionally closed afterward, which is what makes this a compliant Gopher server --- recall from Chapter~\ref{chap:gopher-protocol} that connection closure \emph{is} the protocol's end-of-message signal.
+
+\section{\texttt{main}: Startup and the Accept Loop}
+
+\begin{lstlisting}[style=cstyle]
+int main(int argc, char *argv[]) {
+    if (argc > 1) {
+        root_dir = argv[1];
+    }
+
+    setvbuf(stdout, NULL, _IONBF, 0);
+\end{lstlisting}
+
+If a command-line argument is provided, it overrides the default \texttt{"gopher\_root"} directory --- this is what allows the server to be pointed at an arbitrary content directory, and is discussed further in Chapter~\ref{chap:running-on-linux} when explaining a real gotcha encountered while testing this project. \inlinecode{setvbuf(stdout, NULL, \_IONBF, 0)} disables \inlinecode{stdout} buffering entirely. By default, C's standard I/O library buffers output differently depending on whether \inlinecode{stdout} is connected to an interactive terminal (line-buffered) or to a file/pipe (fully buffered). When a server is launched in the background with its output redirected to a log file, full buffering means \inlinecode{printf} calls may sit in memory for a long time before actually being written --- disabling buffering ensures log lines appear immediately, which matters both for live debugging and for the testing procedure documented in Chapter~\ref{chap:testing}.
+
+\begin{lstlisting}[style=cstyle]
+    int server_fd = create_server_socket(PORT, 10);
+    if (server_fd < 0) {
+        fprintf(stderr, "Failed to start server\n");
+        return 1;
+    }
+
+    printf("Gopher server running on port %d (root: %s)\n", PORT, root_dir);
+    printf("Try: printf '\\r\\n' | nc localhost %d\n", PORT);
+\end{lstlisting}
+
+The listening socket is created via the shared helper from Chapter~\ref{chap:socket-utils}, with a backlog of 10 pending connections. Startup diagnostics are printed, including a ready-to-use example command using \inlinecode{nc} (netcat) for manual testing.
+
+\begin{lstlisting}[style=cstyle]
+    while (1) {
+        struct sockaddr_in client_addr;
+        socklen_t addr_len = sizeof(client_addr);
+        int client_fd = accept(server_fd, (struct sockaddr *)&client_addr, &addr_len);
+        if (client_fd < 0) {
+            perror("accept");
+            continue;
+        }
+
+        printf("[gopher] New connection from %s\n", inet_ntoa(client_addr.sin_addr));
+        handle_client(client_fd);
+    }
+
+    close(server_fd);
+    return 0;
+}
+\end{lstlisting}
+
+This is the server's main loop, and it runs forever. Each iteration blocks on \inlinecode{accept} until a client connects, at which point \inlinecode{client\_addr} is populated with the connecting peer's address information. \inlinecode{inet\_ntoa} converts the binary IP address into its familiar dotted-decimal string form (e.g.\ \texttt{"127.0.0.1"}) for the log message. \inlinecode{handle\_client} is then called synchronously --- meaning the server processes exactly one client at a time and cannot accept a second connection until the first has been fully handled and closed. This single-threaded, sequential design is a deliberate simplification; see Chapter~\ref{chap:limitations} for a discussion of concurrency as a possible extension.
+
+The final \inlinecode{close(server\_fd)} and \inlinecode{return 0} are technically unreachable in normal operation, since the \inlinecode{while(1)} loop above never exits except via external termination (e.g.\ \texttt{Ctrl+C}, or the process being killed). They are included for completeness and to document what \emph{would} happen were the loop ever to exit via a \inlinecode{break}.

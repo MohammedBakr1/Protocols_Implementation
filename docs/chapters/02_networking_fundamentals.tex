@@ -1,0 +1,141 @@
+\chapter{Networking Fundamentals}
+\label{chap:networking-fundamentals}
+
+This chapter builds the conceptual vocabulary used throughout the rest of the document. Readers already comfortable with sockets, TCP, and byte ordering may skip to Chapter~\ref{chap:project-structure}.
+
+\section{What Is a Socket?}
+
+A \textbf{socket} is an operating-system abstraction representing one endpoint of a bidirectional communication channel. From the perspective of a C program, a socket behaves much like a file: the kernel hands back an integer \textbf{file descriptor} (fd), and the program reads from and writes to that descriptor using system calls. The key difference is that instead of reading/writing bytes to a file on disk, the bytes travel across a network (or, in the case of \texttt{localhost}, through a loopback interface without ever leaving the machine).
+
+Every socket used in this project is created with:
+
+\begin{lstlisting}[style=cstyle]
+int fd = socket(AF_INET, SOCK_STREAM, 0);
+\end{lstlisting}
+
+\begin{itemize}
+    \item \inlinecode{AF\_INET} selects the IPv4 address family.
+    \item \inlinecode{SOCK\_STREAM} selects TCP: a connection-oriented, reliable, ordered byte stream.
+    \item The third argument (\inlinecode{0}) lets the kernel pick the default protocol for the given family/type combination, which for \inlinecode{SOCK\_STREAM} is always TCP.
+\end{itemize}
+
+\begin{note}
+This project exclusively uses TCP (\inlinecode{SOCK\_STREAM}). The alternative, \inlinecode{SOCK\_DGRAM} (UDP), provides no ordering or delivery guarantees and is not used here. Both HTTP and Gopher are defined as TCP protocols.
+\end{note}
+
+\section{The TCP Connection Lifecycle}
+
+\subsection{Server Side}
+
+A TCP server follows a strict sequence of system calls:
+
+\begin{enumerate}
+    \item \textbf{\inlinecode{socket()}} --- create an unbound, unconnected socket.
+    \item \textbf{\inlinecode{bind()}} --- associate the socket with a specific local IP address and port number.
+    \item \textbf{\inlinecode{listen()}} --- mark the socket as passive (willing to accept incoming connections), and specify a backlog queue size.
+    \item \textbf{\inlinecode{accept()}} --- block until a client connects, then return a \emph{new} file descriptor representing that specific connection. The original listening socket remains open and can accept further connections.
+    \item \textbf{\inlinecode{recv()} / \inlinecode{send()}} --- exchange data with the connected client, using the fd returned by \inlinecode{accept()}, not the listening fd.
+    \item \textbf{\inlinecode{close()}} --- close the per-connection fd once the exchange is finished.
+\end{enumerate}
+
+\begin{tikzpicture}[node distance=1.1cm, every node/.style={font=\small}]
+    \node[draw, rectangle, rounded corners, fill=notebg, minimum width=3.2cm] (s1) {socket()};
+    \node[draw, rectangle, rounded corners, fill=notebg, minimum width=3.2cm, below=of s1] (s2) {bind()};
+    \node[draw, rectangle, rounded corners, fill=notebg, minimum width=3.2cm, below=of s2] (s3) {listen()};
+    \node[draw, rectangle, rounded corners, fill=notebg, minimum width=3.2cm, below=of s3] (s4) {accept() (blocks)};
+    \node[draw, rectangle, rounded corners, fill=notebg, minimum width=3.2cm, below=of s4] (s5) {recv() / send()};
+    \node[draw, rectangle, rounded corners, fill=notebg, minimum width=3.2cm, below=of s5] (s6) {close(client\_fd)};
+
+    \draw[-Stealth] (s1) -- (s2);
+    \draw[-Stealth] (s2) -- (s3);
+    \draw[-Stealth] (s3) -- (s4);
+    \draw[-Stealth] (s4) -- (s5);
+    \draw[-Stealth] (s5) -- (s6);
+    \draw[-Stealth] (s6.east) .. controls +(2,0) and +(2,-4) .. (s4.east)
+        node[midway, right, xshift=0.3cm] {\parbox{2.5cm}{\centering loop: accept next client}};
+\end{tikzpicture}
+
+\subsection{Client Side}
+
+A client's sequence is much shorter:
+
+\begin{enumerate}
+    \item \textbf{\inlinecode{socket()}} --- create the socket.
+    \item \textbf{\inlinecode{connect()}} --- initiate the TCP three-way handshake with a specific server address and port. This call blocks until the handshake completes (or fails).
+    \item \textbf{\inlinecode{send()} / \inlinecode{recv()}} --- exchange data.
+    \item \textbf{\inlinecode{close()}} --- close the connection.
+\end{enumerate}
+
+\section{The TCP Three-Way Handshake}
+
+Although the handshake itself is handled transparently by the kernel when \inlinecode{connect()} and \inlinecode{accept()} are called, understanding it explains why these calls can block and occasionally fail:
+
+\begin{enumerate}
+    \item \textbf{SYN}: the client sends a segment requesting synchronization.
+    \item \textbf{SYN-ACK}: the server acknowledges and sends its own synchronization request.
+    \item \textbf{ACK}: the client acknowledges the server's request.
+\end{enumerate}
+
+Only after this exchange completes does \inlinecode{accept()} on the server return a usable connected file descriptor, and does \inlinecode{connect()} on the client return successfully.
+
+\section{Byte Order: Why \texttt{htons()} Exists}
+
+Different CPU architectures store multi-byte integers in memory in different orders:
+
+\begin{itemize}
+    \item \textbf{Little-endian} (e.g.\ x86, x86-64): the least significant byte is stored first.
+    \item \textbf{Big-endian} (e.g.\ many older RISC systems, and network protocols by convention): the most significant byte is stored first.
+\end{itemize}
+
+Network protocols standardize on big-endian, historically called \textbf{network byte order}. Because a client and server may run on machines with different native (\textbf{host}) byte orders, port numbers and IP addresses must be explicitly converted before being placed into a \inlinecode{struct sockaddr\_in}. This project uses:
+
+\begin{lstlisting}[style=cstyle]
+addr.sin_port = htons(port);
+\end{lstlisting}
+
+\inlinecode{htons} stands for \textbf{h}ost \textbf{to} \textbf{n}etwork, \textbf{s}hort (16-bit). The corresponding reverse conversion is \inlinecode{ntohs}. For 32-bit values (such as IPv4 addresses), the analogous functions are \inlinecode{htonl} and \inlinecode{ntohl}.
+
+\begin{warnbox}
+Forgetting \inlinecode{htons()} is a classic bug: on a little-endian machine, binding to port 8080 (\texttt{0x1F90}) without conversion would actually bind to port \texttt{0x901F} = 36895. The code would compile and run without error, but the server would listen on the wrong port.
+\end{warnbox}
+
+\section{Blocking I/O and Partial Reads/Writes}
+\label{sec:partial-io}
+
+This is the single most important practical lesson in this project, and the reason the shared utility library (Chapter~\ref{chap:socket-utils}) exists at all.
+
+\subsection{\texttt{recv()} May Return Fewer Bytes Than Requested}
+
+When a program calls \inlinecode{recv(fd, buffer, 4096, 0)}, it is asking the kernel for \emph{up to} 4096 bytes. The kernel is free to return anywhere from 1 byte to 4096 bytes in a single call, depending on how much data has arrived and been buffered so far. TCP is a \emph{byte stream}, not a message-based protocol: it makes no promise that the boundaries of your \inlinecode{send()} calls on one side will match the boundaries of your \inlinecode{recv()} calls on the other side.
+
+Consequently, any code that assumes ``one \inlinecode{recv()} call = one complete message'' is incorrect in general, even though it may appear to work reliably in local testing (where messages are small and the loopback interface rarely fragments them).
+
+\subsection{\texttt{send()} May Send Fewer Bytes Than Requested}
+
+Symmetrically, \inlinecode{send(fd, buffer, len, 0)} is permitted to transmit fewer than \inlinecode{len} bytes and return the actual number sent. This typically happens when the kernel's internal send buffer is full. Code that ignores the return value of \inlinecode{send()} silently truncates its own output under load.
+
+\subsection{The Standard Fix: Loop Until Done}
+
+The correct pattern for both directions is a loop:
+
+\begin{lstlisting}[style=cstyle]
+size_t sent_total = 0;
+while (sent_total < len) {
+    ssize_t n = send(fd, buf + sent_total, len - sent_total, 0);
+    if (n < 0) { /* handle error */ }
+    sent_total += (size_t)n;
+}
+\end{lstlisting}
+
+This project implements exactly this pattern once, in \inlinecode{send\_all()} (Chapter~\ref{chap:socket-utils}), and reuses it everywhere data needs to be sent reliably.
+
+\section{Signaling the End of a Message}
+
+Because TCP is a raw byte stream with no built-in concept of ``message boundaries,'' every application-layer protocol must define its own way of telling the receiver when a logical message is complete. This project's two protocols use the two most common strategies, which is precisely why they were chosen together:
+
+\begin{itemize}
+    \item \textbf{Connection closure} (used by Gopher): the sender simply closes the connection once done. The receiver knows the message is complete when \inlinecode{recv()} returns \texttt{0} (end-of-file on the socket).
+    \item \textbf{Explicit length framing} (used by HTTP): the sender includes a \inlinecode{Content-Length} header stating exactly how many body bytes follow the headers. The receiver first finds the end of the headers (the sequence \texttt{"\textbackslash r\textbackslash n\textbackslash r\textbackslash n"}), then reads exactly that many additional bytes.
+\end{itemize}
+
+Both strategies are explored in depth in their respective protocol chapters.

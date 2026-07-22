@@ -1,0 +1,252 @@
+\chapter{Line-by-Line: \texttt{http\_server.c}}
+\label{chap:http-server}
+
+\section{Includes and Constants}
+
+\begin{lstlisting}[style=cstyle]
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include <sys/stat.h>
+#include "../common/socket_utils.h"
+
+#define PORT 8080
+#define MAX_REQUEST 8192
+
+static const char *root_dir = "www";
+\end{lstlisting}
+
+The additional header here compared to \texttt{gopher\_server.c} is \inlinecode{<sys/stat.h>}, needed for the \inlinecode{stat()} call used later to determine file sizes. \inlinecode{MAX\_REQUEST} bounds the size of the buffer used to receive an incoming HTTP request; requests larger than 8192 bytes are not supported by this simplified implementation (a limitation discussed in Chapter~\ref{chap:limitations}).
+
+\section{\texttt{guess\_content\_type}: Mapping File Extensions to MIME Types}
+
+\begin{lstlisting}[style=cstyle]
+static const char *guess_content_type(const char *path) {
+    const char *ext = strrchr(path, '.');
+    if (!ext) return "application/octet-stream";
+
+    if (strcmp(ext, ".html") == 0 || strcmp(ext, ".htm") == 0) return "text/html";
+    if (strcmp(ext, ".txt") == 0) return "text/plain";
+    if (strcmp(ext, ".css") == 0) return "text/css";
+    if (strcmp(ext, ".js") == 0) return "application/javascript";
+    if (strcmp(ext, ".json") == 0) return "application/json";
+    if (strcmp(ext, ".png") == 0) return "image/png";
+    if (strcmp(ext, ".jpg") == 0 || strcmp(ext, ".jpeg") == 0) return "image/jpeg";
+
+    return "application/octet-stream";
+}
+\end{lstlisting}
+
+\inlinecode{strrchr(path, '.')} finds the \emph{last} occurrence of a period in the path, which correctly isolates the file extension even for filenames containing multiple periods (e.g.\ \texttt{archive.tar.gz} would match \texttt{.gz}). A small table of known extensions is checked in sequence; anything unrecognized falls back to \texttt{application/octet-stream}, the standard MIME type meaning ``arbitrary binary data,'' which causes browsers to typically offer the file for download rather than attempting to render it. Real-world servers use a much larger table (often loaded from a \texttt{mime.types} file) covering hundreds of extensions; this function is a deliberately minimal illustration of the same idea.
+
+\section{\texttt{parse\_request\_line}: Extracting Method and Path}
+
+\begin{lstlisting}[style=cstyle]
+static int parse_request_line(const char *request, char *method, char *path) {
+    const char *line_end = strstr(request, "\r\n");
+    if (!line_end) return -1;
+
+    int matched = sscanf(request, "%15s %255s", method, path);
+    if (matched != 2) return -1;
+
+    return 0;
+}
+\end{lstlisting}
+
+This function extracts only the two fields the server actually needs from the request line (Chapter~\ref{chap:http-protocol}): the HTTP method and the requested path. The HTTP version field (e.g.\ \texttt{HTTP/1.1}) is intentionally not parsed or validated, since this implementation always responds with \texttt{HTTP/1.1} regardless of what the client requested --- another deliberate scope reduction.
+
+\inlinecode{sscanf} with the format \texttt{"\%15s \%255s"} reads two whitespace-delimited tokens. The numbers \texttt{15} and \texttt{255} are \textbf{field width limits}: they cap how many characters \inlinecode{sscanf} will write into \inlinecode{method} and \inlinecode{path} respectively, matching the sizes of the buffers the caller allocates for them (\texttt{16} and \texttt{256} bytes, leaving room for the null terminator). This is a critical safety measure --- without explicit width limits, \inlinecode{\%s} in \inlinecode{sscanf} will write as many characters as it finds before the next whitespace, with no regard for the destination buffer's actual size, which is a classic buffer-overflow vulnerability pattern. \inlinecode{matched != 2} catches malformed request lines where fewer than two tokens could be extracted (for example, an empty request).
+
+\section{\texttt{send\_response}: The Core Response-Writing Function}
+
+\begin{lstlisting}[style=cstyle]
+static void send_response(int client_fd, int status_code, const char *status_text,
+                           const char *content_type, const char *body, size_t body_len) {
+    char header[512];
+    int header_len = snprintf(header, sizeof(header),
+        "HTTP/1.1 %d %s\r\n"
+        "Content-Type: %s\r\n"
+        "Content-Length: %zu\r\n"
+        "Connection: close\r\n"
+        "\r\n",
+        status_code, status_text, content_type, body_len);
+
+    send_all(client_fd, header, (size_t)header_len);
+    if (body_len > 0) {
+        send_all(client_fd, body, body_len);
+    }
+}
+\end{lstlisting}
+
+Every response the server sends --- success or error --- ultimately funnels through this single function, ensuring the response format (Chapter~\ref{chap:http-protocol}) is constructed consistently in exactly one place. The header block is built as a single \inlinecode{snprintf} call using adjacent string-literal concatenation (a standard C feature where consecutive quoted strings are automatically joined by the compiler), producing the status line followed by three headers and the mandatory blank line.
+
+\inlinecode{Content-Length} is computed from \inlinecode{body\_len}, which the caller must supply accurately --- this is only possible because, as noted in Chapter~\ref{chap:http-protocol}, the \emph{server} always knows its own body's exact size in advance (unlike the client, which must discover this by parsing an incoming response). \inlinecode{Connection: close} is sent unconditionally, correctly advertising to the client that this implementation does not support persistent connections. The header is sent first, then the body only if \inlinecode{body\_len > 0} --- this guard avoids calling \inlinecode{send\_all} with a zero-length buffer for bodyless responses (such as the \texttt{500} error path seen later in this chapter).
+
+\section{Error Response Helpers}
+
+\begin{lstlisting}[style=cstyle]
+static void send_404(int client_fd) {
+    const char *body = "<html><body><h1>404 Not Found</h1></body></html>";
+    send_response(client_fd, 404, "Not Found", "text/html", body, strlen(body));
+}
+
+static void send_400(int client_fd) {
+    const char *body = "<html><body><h1>400 Bad Request</h1></body></html>";
+    send_response(client_fd, 400, "Bad Request", "text/html", body, strlen(body));
+}
+
+static void send_405(int client_fd) {
+    const char *body = "<html><body><h1>405 Method Not Allowed</h1></body></html>";
+    send_response(client_fd, 405, "Method Not Allowed", "text/html", body, strlen(body));
+}
+\end{lstlisting}
+
+These three thin wrapper functions each hard-code a minimal HTML error page and delegate to \inlinecode{send\_response}. Factoring them out keeps the call sites later in the file (inside \inlinecode{serve\_file} and \inlinecode{handle\_client}) short and self-documenting, e.g.\ a call site simply reads \inlinecode{send\_404(client\_fd);} rather than repeating the full response-construction logic at every point an error can occur.
+
+\section{\texttt{serve\_file}: Reading and Serving a File from Disk}
+
+\begin{lstlisting}[style=cstyle]
+static void serve_file(int client_fd, const char *path) {
+    char full_path[600];
+
+    if (strcmp(path, "/") == 0) {
+        snprintf(full_path, sizeof(full_path), "%s/index.html", root_dir);
+    } else {
+        snprintf(full_path, sizeof(full_path), "%s%s", root_dir, path);
+    }
+\end{lstlisting}
+
+The requested URL path is translated into a filesystem path relative to \inlinecode{root\_dir}. A request for \texttt{/} is special-cased to serve \texttt{index.html}, mirroring the conventional behavior of essentially all real web servers when a directory (rather than a specific file) is requested.
+
+\begin{lstlisting}[style=cstyle]
+    if (strstr(path, "..") != NULL) {
+        send_400(client_fd);
+        return;
+    }
+\end{lstlisting}
+
+This is the server's \textbf{path traversal defense}. Without it, a request such as \texttt{GET /../../etc/passwd} would have its path concatenated directly onto \inlinecode{root\_dir}, potentially escaping the intended content directory entirely and exposing arbitrary files readable by the server process. The check here is intentionally simple --- it rejects any path containing the literal substring \texttt{".."} --- rather than performing full path canonicalization (resolving \texttt{.} and \texttt{..} segments and verifying the result still lies within \inlinecode{root\_dir}, as a production server would do). Chapter~\ref{chap:testing} documents how this exact defense was verified to work, and specifically why testing it with \inlinecode{curl} initially gave a misleading result.
+
+\begin{warnbox}
+Notice that the \texttt{".."} check happens \emph{after} \inlinecode{full\_path} has already been constructed with \inlinecode{snprintf}, but the function correctly returns before that (unsafe) \inlinecode{full\_path} is ever used to open a file. The check operates on the original, unmodified \inlinecode{path} argument, not on \inlinecode{full\_path} --- either would work here, but validating the raw untrusted input directly is the clearer pattern to follow in general.
+\end{warnbox}
+
+\begin{lstlisting}[style=cstyle]
+    FILE *f = fopen(full_path, "rb");
+    if (!f) {
+        send_404(client_fd);
+        return;
+    }
+
+    struct stat st;
+    if (stat(full_path, &st) != 0) {
+        fclose(f);
+        send_404(client_fd);
+        return;
+    }
+\end{lstlisting}
+
+The file is opened in binary mode (\texttt{"rb"}) --- on POSIX systems this is equivalent to text mode, but specifying it explicitly is good practice for portability and signals clear intent, since the server may serve non-text content (images, per \inlinecode{guess\_content\_type}). \inlinecode{stat()} retrieves file metadata, most importantly \inlinecode{st.st\_size}, the exact file size in bytes, which is required to compute \texttt{Content-Length} correctly \emph{before} any data is sent (recall from Chapter~\ref{chap:http-protocol} that the header block, including \texttt{Content-Length}, must precede the body).
+
+\begin{lstlisting}[style=cstyle]
+    char *body = malloc((size_t)st.st_size);
+    if (!body) {
+        fclose(f);
+        send_response(client_fd, 500, "Internal Server Error", "text/plain", "", 0);
+        return;
+    }
+
+    size_t read_bytes = fread(body, 1, (size_t)st.st_size, f);
+    fclose(f);
+
+    send_response(client_fd, 200, "OK", guess_content_type(full_path), body, read_bytes);
+    free(body);
+}
+\end{lstlisting}
+
+Unlike the Gopher server (Chapter~\ref{chap:gopher-server}), which streams file content in fixed-size chunks, this HTTP server reads the \emph{entire} file into a single heap-allocated buffer before sending anything. This is a direct consequence of the framing requirement discussed in Chapter~\ref{chap:http-protocol}: since \texttt{Content-Length} must be sent in the header \emph{before} the body, and the header is built by \inlinecode{send\_response} as a single unit, the simplest correct implementation determines the total size up front (via \inlinecode{stat}) and reads it all before calling \inlinecode{send\_response}. This trades memory efficiency for implementation simplicity; a streaming HTTP implementation is possible (send headers first, then stream the body separately) but adds complexity intentionally avoided here, and is noted as a possible extension in Chapter~\ref{chap:limitations}.
+
+\inlinecode{read\_bytes} (the value actually returned by \inlinecode{fread}) is used for \texttt{Content-Length}, rather than \inlinecode{st.st\_size}, as a defensive measure: in the (rare) case these values differ, the response header will always accurately describe what was actually placed in the buffer and subsequently sent.
+
+\section{\texttt{handle\_client}: Reading and Dispatching a Request}
+
+\begin{lstlisting}[style=cstyle]
+static void handle_client(int client_fd) {
+    char request[MAX_REQUEST] = {0};
+    ssize_t n = recv(client_fd, request, sizeof(request) - 1, 0);
+    if (n <= 0) {
+        close(client_fd);
+        return;
+    }
+    request[n] = '\0';
+\end{lstlisting}
+
+Similarly to the Gopher server's \inlinecode{handle\_client}, this function reads the request with a single \inlinecode{recv} call rather than looping until a complete request is confirmed present. For the small, simple GET requests this server and its accompanying client generate, the request reliably arrives in one TCP segment on the loopback interface, but a fully robust implementation would need to handle the possibility of a request line and headers being split across multiple \inlinecode{recv} calls, analogous to the framing logic the HTTP \emph{client} implements in Chapter~\ref{chap:http-client}.
+
+\begin{lstlisting}[style=cstyle]
+    char method[16] = {0};
+    char path[256] = {0};
+
+    if (parse_request_line(request, method, path) != 0) {
+        send_400(client_fd);
+        close(client_fd);
+        return;
+    }
+
+    printf("[http] %s %s\n", method, path);
+
+    if (strcmp(method, "GET") != 0) {
+        send_405(client_fd);
+        close(client_fd);
+        return;
+    }
+
+    serve_file(client_fd, path);
+    close(client_fd);
+}
+\end{lstlisting}
+
+The dispatch logic is straightforward: a malformed request line yields \texttt{400 Bad Request}; a well-formed request line with a method other than \texttt{GET} yields \texttt{405 Method Not Allowed}; and a well-formed \texttt{GET} request is handed to \inlinecode{serve\_file}. Every path through this function ends in \inlinecode{close(client\_fd)}, consistent with the \texttt{Connection: close} header always sent --- the server never attempts to reuse a connection for a second request.
+
+\section{\texttt{main}: Startup and the Accept Loop}
+
+\begin{lstlisting}[style=cstyle]
+int main(int argc, char *argv[]) {
+    if (argc > 1) {
+        root_dir = argv[1];
+    }
+
+    setvbuf(stdout, NULL, _IONBF, 0);
+
+    int server_fd = create_server_socket(PORT, 10);
+    if (server_fd < 0) {
+        fprintf(stderr, "Failed to start server\n");
+        return 1;
+    }
+
+    printf("HTTP server running on port %d (root: %s)\n", PORT, root_dir);
+    printf("Try: curl http://localhost:%d/\n", PORT);
+
+    while (1) {
+        struct sockaddr_in client_addr;
+        socklen_t addr_len = sizeof(client_addr);
+        int client_fd = accept(server_fd, (struct sockaddr *)&client_addr, &addr_len);
+        if (client_fd < 0) {
+            perror("accept");
+            continue;
+        }
+
+        printf("[http] New connection from %s\n", inet_ntoa(client_addr.sin_addr));
+        handle_client(client_fd);
+    }
+
+    close(server_fd);
+    return 0;
+}
+\end{lstlisting}
+
+This function is structurally identical to the Gopher server's \inlinecode{main} (Chapter~\ref{chap:gopher-server}): optionally override \inlinecode{root\_dir} from \inlinecode{argv[1]}, disable \inlinecode{stdout} buffering, create the listening socket, and loop forever accepting and synchronously handling one client connection at a time. The deliberate structural symmetry between the two servers' \inlinecode{main} functions is intended to make the \emph{differences} between the two protocols --- concentrated entirely in \inlinecode{handle\_client} and its helpers --- as visible as possible.

@@ -1,0 +1,52 @@
+\chapter{The Gopher Protocol}
+\label{chap:gopher-protocol}
+
+\section{Historical Context}
+
+Gopher, defined in RFC~1436 (1991), predates the World Wide Web's mainstream adoption and was, for a period in the early 1990s, a leading protocol for distributing hierarchically-organized documents over the Internet. Its design goals were simplicity and low implementation cost, both of which make it an excellent teaching protocol today.
+
+\section{Protocol Overview}
+
+A Gopher exchange is a single request followed by a single response, after which the connection is closed:
+
+\begin{enumerate}
+    \item The client opens a TCP connection to the server (traditionally port 70; this project uses port 7070 to avoid requiring root privileges, since ports below 1024 are typically restricted to privileged processes on Linux).
+    \item The client sends exactly one line of text, called a \textbf{selector}, terminated by \texttt{\textbackslash r\textbackslash n}. An empty selector (i.e.\ just \texttt{\textbackslash r\textbackslash n}) requests the server's root menu.
+    \item The server sends back the corresponding content as a raw byte stream.
+    \item The server closes the connection. This closure \emph{is} the end-of-message signal --- there is no length field or other explicit terminator required by the protocol (though menus conventionally end with a line containing only a period, as described below).
+\end{enumerate}
+
+\section{The Menu Format}
+
+When a selector refers to a directory-like resource rather than a plain document, the response is a \textbf{menu}: a list of further selectors the client can follow. Each line of a menu has the format:
+
+\begin{center}
+\texttt{<type><display\_text>\textbackslash t<selector>\textbackslash t<host>\textbackslash t<port>\textbackslash r\textbackslash n}
+\end{center}
+
+\begin{itemize}
+    \item \textbf{type} is a single character indicating what kind of resource this entry is. This implementation uses \texttt{0} for a plain text file, \texttt{1} for a submenu (directory), and \texttt{3} for an error.
+    \item \textbf{display\_text} is the human-readable label a client should show to the user.
+    \item \textbf{selector} is the string the client should send back if it chooses this entry.
+    \item \textbf{host} and \textbf{port} tell the client where to connect to fetch this entry (allowing a single menu to reference resources on entirely different servers).
+\end{itemize}
+
+Fields within a line are separated by the \textbf{tab} character (\texttt{\textbackslash t}), not spaces --- a detail that is easy to overlook but essential for compliant parsing. A menu response is conventionally terminated by a line containing a single period (\texttt{.\textbackslash r\textbackslash n}).
+
+\section{Comparison Table: Gopher's Minimalism}
+
+\begin{center}
+\begin{tabularx}{\textwidth}{l X X}
+\toprule
+\textbf{Aspect} & \textbf{Gopher} & \textbf{HTTP (for comparison)} \\
+\midrule
+Request format & One line (the selector) & Request line + headers + blank line \\
+Response format & Raw content & Status line + headers + blank line + body \\
+End-of-message signal & Connection closure & \inlinecode{Content-Length} header \\
+Status/error reporting & None (type \texttt{3} lines by convention) & Numeric status codes (200, 404, \ldots) \\
+Methods & None --- always ``fetch this selector'' & GET, POST, PUT, DELETE, \ldots \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+This comparison is expanded further once HTTP itself has been covered in Chapter~\ref{chap:http-protocol}.

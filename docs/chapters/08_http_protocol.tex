@@ -1,0 +1,87 @@
+\chapter{The HTTP Protocol (Implemented Subset)}
+\label{chap:http-protocol}
+
+\section{Scope of This Implementation}
+
+Full HTTP/1.1 (RFC~9110--9112) is a large specification covering persistent connections, chunked transfer encoding, content negotiation, caching, range requests, and many other features. This project implements a deliberately narrow, but protocol-correct, subset:
+
+\begin{itemize}
+    \item Only the \textbf{GET} method is supported; other methods receive a \texttt{405 Method Not Allowed} response.
+    \item Every response includes \texttt{Connection: close}, meaning each TCP connection handles exactly one request/response pair --- there is no persistent-connection (keep-alive) support.
+    \item Content length is always communicated via an explicit \texttt{Content-Length} header; chunked transfer encoding is not implemented.
+    \item A minimal set of status codes is used: \texttt{200 OK}, \texttt{400 Bad Request}, \texttt{404 Not Found}, and \texttt{405 Method Not Allowed}.
+\end{itemize}
+
+This scope was chosen to cover the concepts that most clearly extend beyond what Gopher already teaches (Chapter~\ref{chap:gopher-protocol}), without requiring an implementation of the full specification.
+
+\section{Request Format}
+
+\begin{lstlisting}[style=bashstyle, numbers=none]
+GET /index.html HTTP/1.1
+Host: localhost
+Connection: close
+
+\end{lstlisting}
+
+An HTTP request consists of three parts, each terminated by \texttt{\textbackslash r\textbackslash n}:
+
+\begin{enumerate}
+    \item \textbf{Request line}: \texttt{METHOD SP path SP HTTP-version}, e.g.\ \texttt{GET /index.html HTTP/1.1}.
+    \item \textbf{Headers}: zero or more \texttt{Name: value} lines.
+    \item \textbf{A blank line} (i.e.\ two consecutive \texttt{\textbackslash r\textbackslash n} sequences) marking the end of the headers and the start of any body.
+\end{enumerate}
+
+For a \texttt{GET} request, there is normally no body, so the blank line effectively marks the end of the entire request.
+
+\section{Response Format}
+
+\begin{lstlisting}[style=bashstyle, numbers=none]
+HTTP/1.1 200 OK
+Content-Type: text/html
+Content-Length: 137
+Connection: close
+
+<html>...</html>
+\end{lstlisting}
+
+The response mirrors the request's structure:
+
+\begin{enumerate}
+    \item \textbf{Status line}: \texttt{HTTP-version SP status-code SP reason-phrase}, e.g.\ \texttt{HTTP/1.1 200 OK}.
+    \item \textbf{Headers}, most importantly \texttt{Content-Type} (telling the client how to interpret the body) and \texttt{Content-Length} (telling the client exactly how many bytes of body follow).
+    \item \textbf{A blank line}.
+    \item \textbf{The body} --- exactly \texttt{Content-Length} bytes.
+\end{enumerate}
+
+\section{The Central Technical Challenge: Framing}
+\label{sec:http-framing}
+
+The hardest part of implementing HTTP correctly, and the concept this project is specifically designed to surface, is: \emph{how does a reader know when the message is complete?}
+
+Unlike Gopher, where the answer is simply ``when the connection closes'' (Chapter~\ref{chap:gopher-protocol}), HTTP as implemented here requires two distinct steps:
+
+\begin{enumerate}
+    \item \textbf{Find the end of the headers.} This is always marked by the four-byte sequence \texttt{\textbackslash r\textbackslash n\textbackslash r\textbackslash n}. Everything before it is the status/request line plus headers; everything after it is the body.
+    \item \textbf{Determine the body length.} Parse the \texttt{Content-Length} header (if present) from the headers section, and read exactly that many bytes following the blank line.
+\end{enumerate}
+
+This project's HTTP client (Chapter~\ref{chap:http-client}) implements both steps explicitly, since --- unlike the server, which \emph{generates} a well-formed response and therefore always knows its own body length --- the client must \emph{parse} an arbitrary incoming response without knowing its length in advance.
+
+\section{Comparison with Gopher}
+
+\begin{center}
+\begin{tabularx}{\textwidth}{l X X}
+\toprule
+\textbf{Aspect} & \textbf{HTTP (this implementation)} & \textbf{Gopher} \\
+\midrule
+Request structure & Request line + headers + blank line & Single selector line \\
+Response structure & Status line + headers + blank line + body & Raw content \\
+End-of-message signal & \texttt{Content-Length} header & Connection closure \\
+Status reporting & Numeric codes (200, 400, 404, 405) & None (informal type-\texttt{3} error lines) \\
+Methods & GET (others rejected with 405) & None --- always ``fetch'' \\
+Content typing & \texttt{Content-Type} header, guessed from file extension & None --- client must infer from context \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+This table extends the one presented in Chapter~\ref{chap:gopher-protocol}, and is the clearest single summary of what implementing HTTP \emph{after} Gopher actually adds, conceptually.

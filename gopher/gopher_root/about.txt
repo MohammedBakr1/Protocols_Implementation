@@ -1,0 +1,1 @@
+This is a sample Gopher file served over TCP.
